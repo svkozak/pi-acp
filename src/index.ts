@@ -1,8 +1,6 @@
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from './acp/agent.js'
 
-// ACP speaks NDJSON over stdio.
-// Pattern based on opencode's `cli/cmd/acp.ts`.
 
 const input = new WritableStream<Uint8Array>({
   write(chunk) {

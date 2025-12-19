@@ -7,6 +7,8 @@ import type {
   ToolKind
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
+import { readFileSync } from 'node:fs'
+import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, type PiRpcEvent } from '../pi-rpc/process.js'
 import { SessionStore } from './session-store.js'
 import { toolResultToText } from './translate/pi-tools.js'
@@ -111,6 +113,11 @@ export class PiAcpSession {
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   private inAgentLoop = false
+
+  // For ACP diff support: capture file contents before edits, then emit ToolCallContent {type:"diff"}.
+  // This is due to pi sending diff as a string as opposed to ACP expected diff format.
+  // Compatible format may need to be implemented in pi in the future.
+  private editSnapshots = new Map<string, { path: string; oldText: string }>()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -273,6 +280,20 @@ export class PiAcpSession {
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
 
+        // Capture pre-edit file contents so we can emit a structured ACP diff on completion.
+        if (toolName === 'edit') {
+          const p = typeof args?.path === 'string' ? args.path : undefined
+          if (p) {
+            try {
+              const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
+              const oldText = readFileSync(abs, 'utf8')
+              this.editSnapshots.set(toolCallId, { path: p, oldText })
+            } catch {
+              // Ignore snapshot failures; we'll fall back to plain text output.
+            }
+          }
+        }
+
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, 'in_progress')
@@ -324,17 +345,46 @@ export class PiAcpSession {
         const isError = Boolean((ev as any).isError)
         const text = toolResultToText(result)
 
+        // If this was an edit and we captured a snapshot, emit a structured ACP diff.
+        // This enables clients like Zed to render an actual diff UI.
+        const snapshot = this.editSnapshots.get(toolCallId)
+        let content: ToolCallContent[] | undefined
+
+        if (!isError && snapshot) {
+          try {
+            const abs = isAbsolute(snapshot.path) ? snapshot.path : resolvePath(this.cwd, snapshot.path)
+            const newText = readFileSync(abs, 'utf8')
+            if (newText !== snapshot.oldText) {
+              content = [
+                {
+                  type: 'diff',
+                  path: snapshot.path,
+                  oldText: snapshot.oldText,
+                  newText
+                },
+                ...(text ? ([{ type: 'content', content: { type: 'text', text } }] as ToolCallContent[]) : [])
+              ]
+            }
+          } catch {
+            // ignore; fall back to text only
+          }
+        }
+
+        // Fallback: just text content.
+        if (!content && text) {
+          content = [{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[]
+        }
+
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: isError ? 'failed' : 'completed',
-          content: text
-            ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
-            : undefined,
+          content,
           rawOutput: result
         })
 
         this.currentToolCalls.delete(toolCallId)
+        this.editSnapshots.delete(toolCallId)
         break
       }
 
