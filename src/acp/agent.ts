@@ -30,9 +30,10 @@ import {
   toAvailableCommands,
 } from "./slash-commands.js";
 import { isAbsolute } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import type { AvailableCommand } from "@agentclientprotocol/sdk";
-import { dirname, join } from "node:path";
+import { join, dirname } from "node:path";
+import { spawnSync } from "node:child_process";
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -61,6 +62,10 @@ function builtinAvailableCommands(): AvailableCommand[] {
       description:
         "Set pi message queue mode (all | one-at-a-time(recommended))",
       input: { hint: "all | one-at-a-time" },
+    },
+    {
+      name: "changelog",
+      description: "Show pi changelog",
     },
   ];
 }
@@ -295,6 +300,84 @@ export class PiAcpAgent implements ACPAgent {
           update: {
             sessionUpdate: "agent_message_chunk",
             content: { type: "text", text: `Queue mode set to: ${modeRaw}` },
+          },
+        });
+
+        return { stopReason: "end_turn" };
+      }
+
+      if (cmd === "changelog") {
+        // Read pi's installed CHANGELOG.md. Adapter-side, no model call.
+        const findChangelog = (): string | null => {
+          // 1) Locate the installed pi package by resolving the `pi` executable.
+          // On Node installs, `pi` typically resolves to .../@mariozechner/pi-coding-agent/dist/cli.js
+          try {
+            const whichCmd = process.platform === "win32" ? "where" : "which";
+            const which = spawnSync(whichCmd, ["pi"], { encoding: "utf-8" });
+            const piPath = String(which.stdout ?? "")
+              .split(/\r?\n/)[0]
+              ?.trim();
+
+            if (piPath) {
+              const resolved = realpathSync(piPath);
+              const pkgRoot = dirname(dirname(resolved));
+              const p = join(pkgRoot, "CHANGELOG.md");
+              if (existsSync(p)) return p;
+            }
+          } catch {
+            // ignore
+          }
+
+          // 2) Fallback: ask npm where global modules live.
+          try {
+            const npmRoot = spawnSync("npm", ["root", "-g"], { encoding: "utf-8" });
+            const root = String(npmRoot.stdout ?? "").trim();
+            if (root) {
+              const p = join(root, "@mariozechner", "pi-coding-agent", "CHANGELOG.md");
+              if (existsSync(p)) return p;
+            }
+          } catch {
+            // ignore
+          }
+
+          return null;
+        };
+
+        const changelogPath = findChangelog();
+        if (!changelogPath) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Changelog not found (couldn't locate pi installation)." },
+            },
+          });
+          return { stopReason: "end_turn" };
+        }
+
+        let text = "";
+        try {
+          text = readFileSync(changelogPath, "utf-8");
+        } catch (e: any) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `Failed to read changelog: ${String(e?.message ?? e)}` },
+            },
+          });
+          return { stopReason: "end_turn" };
+        }
+
+        // Keep it reasonably sized in chat.
+        const maxChars = 20_000;
+        if (text.length > maxChars) text = text.slice(0, maxChars) + "\n\n...(truncated)...";
+
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text },
           },
         });
 
