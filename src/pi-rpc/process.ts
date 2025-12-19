@@ -14,6 +14,7 @@ type PiRpcCommand =
   | { type: "compact"; id?: string; customInstructions?: string }
   | { type: "set_auto_compaction"; id?: string; enabled: boolean }
   // Session
+  | { type: "export_html"; id?: string; outputPath?: string }
   | { type: "switch_session"; id?: string; sessionPath: string }
   // Messages
   | { type: "get_messages"; id?: string }
@@ -97,8 +98,17 @@ export class PiRpcProcess {
     const proc = new PiRpcProcess(child)
 
     // Best-effort handshake.
+    // Important: pi may emit a get_state response pointing at a sessionFile in a directory
+    // that is created lazily. Create the parent dir up-front to avoid later parse errors
+    // when we call commands like export_html.
     try {
-      await proc.getState()
+      const state = (await proc.getState()) as any
+      const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null
+      if (sessionFile) {
+        const { mkdirSync } = await import("node:fs")
+        const { dirname } = await import("node:path")
+        mkdirSync(dirname(sessionFile), { recursive: true })
+      }
     } catch {
       // ignore for now
     }
@@ -155,6 +165,13 @@ export class PiRpcProcess {
   async setAutoCompaction(enabled: boolean): Promise<void> {
     const res = await this.request({ type: "set_auto_compaction", enabled })
     if (!res.success) throw new Error(`pi set_auto_compaction failed: ${res.error ?? JSON.stringify(res.data)}`)
+  }
+
+  async exportHtml(outputPath?: string): Promise<{ path: string }> {
+    const res = await this.request({ type: "export_html", outputPath })
+    if (!res.success) throw new Error(`pi export_html failed: ${res.error ?? JSON.stringify(res.data)}`)
+    const data: any = res.data
+    return { path: String(data?.path ?? "") }
   }
 
   async switchSession(sessionPath: string): Promise<void> {

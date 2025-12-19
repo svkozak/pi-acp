@@ -41,6 +41,10 @@ function builtinAvailableCommands(): AvailableCommand[] {
       description: "Toggle automatic context compaction",
       input: { hint: "on|off|toggle" },
     },
+    {
+      name: "export",
+      description: "Export session to an HTML file in the session cwd",
+    },
   ];
 }
 
@@ -182,6 +186,107 @@ export class PiAcpAgent implements ACPAgent {
           update: {
             sessionUpdate: "agent_message_chunk",
             content: { type: "text", text },
+          },
+        });
+
+        return { stopReason: "end_turn" };
+      }
+
+      if (cmd === "export") {
+        // For now we always export into the session cwd and do not accept a user-provided path.
+        // IMPORTANT: pi's export_html reads the session JSONL file. If it doesn't exist yet
+        // (no messages) or is empty, pi throws and RPC mode emits an uncorrelated parse error
+        // (no id), which would otherwise hang our request. So we guard here.
+        const state = (await session.proc.getState()) as any;
+        const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
+        const messageCount = typeof state?.messageCount === "number" ? state.messageCount : 0;
+
+        if (!sessionFile || messageCount === 0 || !existsSync(sessionFile)) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Nothing to export yet (no session messages). Send a prompt first." },
+            },
+          });
+          return { stopReason: "end_turn" };
+        }
+
+        try {
+          const raw = readFileSync(sessionFile, "utf-8");
+          if (raw.trim().length === 0) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "Nothing to export yet (empty session file). Send a prompt first." },
+              },
+            });
+            return { stopReason: "end_turn" };
+          }
+        } catch {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Couldn't read session file for export. Try sending a prompt first." },
+            },
+          });
+          return { stopReason: "end_turn" };
+        }
+
+        const safeSessionId = session.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+        const outputPath = join(session.cwd, `pi-session-${safeSessionId}.html`);
+
+        let resultPath = "";
+        try {
+          const result = await session.proc.exportHtml(outputPath);
+          resultPath = result.path;
+        } catch (e: any) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `Export failed: ${String(e?.message ?? e)}` },
+            },
+          });
+          return { stopReason: "end_turn" };
+        }
+
+        if (!resultPath) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Export failed: no output path returned by pi." },
+            },
+          });
+          return { stopReason: "end_turn" };
+        }
+
+        const uri = `file://${resultPath}`;
+
+        // Provide a resource link (clients may render it as clickable).
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "resource_link",
+              name: `pi-session-${safeSessionId}.html`,
+              uri,
+              mimeType: "text/html",
+              title: "Exported session",
+            },
+          },
+        });
+
+        // Plain-text fallback.
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `Exported session to ${resultPath}` },
           },
         });
 
