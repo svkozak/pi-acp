@@ -14,7 +14,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "echo \"(todo)\"",
-    "test": "node --test",
+    "test": "node --import tsx --test test/**/*.test.ts",
     "smoke": "node scripts/smoke-acp.mjs"
   },
   "dependencies": {

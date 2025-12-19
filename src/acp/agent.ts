@@ -4,7 +4,6 @@ import {
   type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
-  type ContentBlock,
   type InitializeRequest,
   type InitializeResponse,
   type LoadSessionRequest,
@@ -18,7 +17,8 @@ import {
 import { SessionManager } from "./session.js";
 import { SessionStore } from "./session-store.js";
 import { PiRpcProcess } from "../pi-rpc/process.js";
-// (paths.ts currently only provides the adapter-owned session map location.)
+import { normalizePiAssistantText, normalizePiMessageText } from "./translate/pi-messages.js";
+import { promptToPiMessage } from "./translate/prompt.js";
 import { isAbsolute } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -234,95 +234,6 @@ export class PiAcpAgent implements ACPAgent {
   }
 }
 
-function normalizePiMessageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((c: any) =>
-      c?.type === "text" && typeof c.text === "string" ? c.text : "",
-    )
-    .filter(Boolean)
-    .join("");
-}
-
-function normalizePiAssistantText(content: unknown): string {
-  // Assistant content is typically an array of blocks; only replay text blocks for MVP.
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((c: any) =>
-      c?.type === "text" && typeof c.text === "string" ? c.text : "",
-    )
-    .filter(Boolean)
-    .join("");
-}
-
-function promptToPiMessage(blocks: ContentBlock[]): {
-  message: string;
-  attachments: PiAttachment[];
-} {
-  let message = "";
-  const attachments: PiAttachment[] = [];
-
-  for (const b of blocks) {
-    switch (b.type) {
-      case "text":
-        message += b.text;
-        break;
-
-      case "resource_link":
-        message += `\n[Context] ${b.uri}`;
-        break;
-
-      case "image": {
-        const id = b.uri ?? crypto.randomUUID();
-        // pi expects base64 without data-url prefix.
-        const size = Buffer.byteLength(b.data, "base64");
-        attachments.push({
-          id,
-          type: "image",
-          fileName: guessFileNameFromMime(b.mimeType),
-          mimeType: b.mimeType,
-          size,
-          content: b.data,
-        });
-        break;
-      }
-
-      // Not supported in pi-acp MVP.
-      case "audio":
-      case "resource":
-        break;
-
-      default:
-        break;
-    }
-  }
-
-  return { message, attachments };
-}
-
-type PiAttachment = {
-  id: string;
-  type: "image" | "document";
-  fileName: string;
-  mimeType: string;
-  size: number;
-  content: string;
-  extractedText?: string;
-  preview?: string;
-};
-
-function guessFileNameFromMime(mimeType: string): string {
-  const ext =
-    mimeType === "image/png"
-      ? "png"
-      : mimeType === "image/jpeg"
-        ? "jpg"
-        : mimeType === "image/webp"
-          ? "webp"
-          : "bin";
-  return `attachment.${ext}`;
-}
 
 async function getModelState(proc: PiRpcProcess): Promise<{
   availableModels: ModelInfo[];
