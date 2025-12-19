@@ -7,12 +7,18 @@ import {
   type ContentBlock,
   type InitializeRequest,
   type InitializeResponse,
+  type LoadSessionRequest,
+  type LoadSessionResponse,
   type NewSessionRequest,
   type PromptRequest,
   type PromptResponse,
   type StopReason,
 } from "@agentclientprotocol/sdk";
 import { SessionManager } from "./session.js";
+import { SessionStore } from "./session-store.js";
+import { PiRpcProcess } from "../pi-rpc/process.js";
+// (paths.ts currently only provides the adapter-owned session map location.)
+import { isAbsolute } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +28,7 @@ const pkg = readNearestPackageJson(import.meta.url);
 export class PiAcpAgent implements ACPAgent {
   private readonly conn: AgentSideConnection;
   private readonly sessions = new SessionManager();
+  private readonly store = new SessionStore();
 
   constructor(conn: AgentSideConnection) {
     this.conn = conn;
@@ -42,7 +49,7 @@ export class PiAcpAgent implements ACPAgent {
       },
       authMethods: [],
       agentCapabilities: {
-        loadSession: false,
+        loadSession: true,
         mcpCapabilities: { http: false, sse: false },
         promptCapabilities: {
           image: true,
@@ -55,7 +62,13 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async newSession(params: NewSessionRequest) {
-    // For MVP we ignore mcpServers, but accept and store.
+    if (!isAbsolute(params.cwd)) {
+      throw RequestError.invalidParams(
+        `cwd must be an absolute path: ${params.cwd}`,
+      );
+    }
+
+    // Pi doesn't support mcpServers, but we accept and store.
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,
@@ -98,9 +111,76 @@ export class PiAcpAgent implements ACPAgent {
     await session.cancel();
   }
 
-  // Optional ACP methods we don't support yet.
-  async loadSession(): Promise<never> {
-    throw RequestError.methodNotFound("loadSession");
+  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    if (!isAbsolute(params.cwd)) {
+      throw RequestError.invalidParams(
+        `cwd must be an absolute path: ${params.cwd}`,
+      );
+    }
+
+    // MVP: ignore mcpServers.
+    const stored = this.store.get(params.sessionId);
+    if (!stored) {
+      throw RequestError.invalidParams(
+        `Unknown sessionId: ${params.sessionId}`,
+      );
+    }
+
+    // Spawn pi and point it directly at the stored session file.
+    const proc = await PiRpcProcess.spawn({
+      cwd: params.cwd,
+      sessionPath: stored.sessionFile,
+    });
+
+    const session = this.sessions.getOrCreate(params.sessionId, {
+      cwd: params.cwd,
+      mcpServers: params.mcpServers,
+      conn: this.conn,
+      proc,
+    });
+
+    // (Optional) ensure mapping stays fresh.
+    this.store.upsert({
+      sessionId: params.sessionId,
+      cwd: params.cwd,
+      sessionFile: stored.sessionFile,
+    });
+
+    // Replay full conversation history.
+    const data = (await proc.getMessages()) as any;
+    const messages = Array.isArray(data?.messages) ? data.messages : [];
+
+    for (const m of messages) {
+      const role = String(m?.role ?? "");
+
+      if (role === "user") {
+        const text = normalizePiMessageText(m?.content);
+        if (text) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: "user_message_chunk",
+              content: { type: "text", text },
+            },
+          });
+        }
+      }
+
+      if (role === "assistant") {
+        const text = normalizePiAssistantText(m?.content);
+        if (text) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text },
+            },
+          });
+        }
+      }
+    }
+
+    return null;
   }
 
   async unstable_setSessionModel(): Promise<never> {
@@ -110,6 +190,28 @@ export class PiAcpAgent implements ACPAgent {
   async setSessionMode(): Promise<never> {
     throw RequestError.methodNotFound("setSessionMode");
   }
+}
+
+function normalizePiMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((c: any) =>
+      c?.type === "text" && typeof c.text === "string" ? c.text : "",
+    )
+    .filter(Boolean)
+    .join("");
+}
+
+function normalizePiAssistantText(content: unknown): string {
+  // Assistant content is typically an array of blocks; only replay text blocks for MVP.
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((c: any) =>
+      c?.type === "text" && typeof c.text === "string" ? c.text : "",
+    )
+    .filter(Boolean)
+    .join("");
 }
 
 function promptToPiMessage(blocks: ContentBlock[]): {

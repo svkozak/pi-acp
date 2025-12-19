@@ -1,6 +1,7 @@
 import type { AgentSideConnection, ContentBlock, McpServer, SessionUpdate, ToolCallContent, ToolKind } from "@agentclientprotocol/sdk"
 import { RequestError } from "@agentclientprotocol/sdk"
 import { PiRpcProcess, type PiRpcEvent } from "../pi-rpc/process.js"
+import { SessionStore } from "./session-store.js"
 
 type SessionCreateParams = {
   cwd: string
@@ -17,10 +18,22 @@ type PendingTurn = {
 
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
+  private readonly store = new SessionStore()
 
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
-    const sessionId = crypto.randomUUID()
-    const proc = await PiRpcProcess.spawn({ cwd: params.cwd })
+    // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
+    // so sessions are visible to the regular `pi` CLI.
+    const proc = await PiRpcProcess.spawn({
+      cwd: params.cwd,
+    })
+
+    const state = (await proc.getState()) as any
+    const sessionId = typeof state?.sessionId === "string" ? state.sessionId : crypto.randomUUID()
+    const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null
+
+    if (sessionFile) {
+      this.store.upsert({ sessionId, cwd: params.cwd, sessionFile })
+    }
 
     const session = new PiAcpSession({
       sessionId,
@@ -38,6 +51,29 @@ export class SessionManager {
     const s = this.sessions.get(sessionId)
     if (!s) throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
     return s
+  }
+
+  /**
+   * Used by session/load: create a session object bound to an existing sessionId/proc
+   * if it isn't already registered.
+   */
+  getOrCreate(
+    sessionId: string,
+    params: SessionCreateParams & { proc: PiRpcProcess },
+  ): PiAcpSession {
+    const existing = this.sessions.get(sessionId)
+    if (existing) return existing
+
+    const session = new PiAcpSession({
+      sessionId,
+      cwd: params.cwd,
+      mcpServers: params.mcpServers,
+      proc: params.proc,
+      conn: params.conn,
+    })
+
+    this.sessions.set(sessionId, session)
+    return session
   }
 }
 

@@ -5,6 +5,8 @@ type PiRpcCommand =
   | { type: "prompt"; id?: string; message: string; attachments?: unknown[] }
   | { type: "abort"; id?: string }
   | { type: "get_state"; id?: string }
+  | { type: "switch_session"; id?: string; sessionPath: string }
+  | { type: "get_messages"; id?: string }
 
 type PiRpcResponse = {
   type: "response"
@@ -19,7 +21,10 @@ export type PiRpcEvent = Record<string, unknown>
 
 type SpawnParams = {
   cwd: string
+  /** Optional override for `pi` executable name/path */
   piCommand?: string
+  /** If set, pi will persist the session to this exact file (via `--session <path>`). */
+  sessionPath?: string
 }
 
 export class PiRpcProcess {
@@ -65,7 +70,11 @@ export class PiRpcProcess {
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
     const cmd = params.piCommand ?? "pi"
-    const child = spawn(cmd, ["--mode", "rpc", "--no-session"], {
+
+    const args = ["--mode", "rpc"]
+    if (params.sessionPath) args.push("--session", params.sessionPath)
+
+    const child = spawn(cmd, args, {
       cwd: params.cwd,
       stdio: "pipe",
       env: process.env,
@@ -107,6 +116,17 @@ export class PiRpcProcess {
   async getState(): Promise<unknown> {
     const res = await this.request({ type: "get_state" })
     if (!res.success) throw new Error(`pi get_state failed: ${res.error ?? JSON.stringify(res.data)}`)
+    return res.data
+  }
+
+  async switchSession(sessionPath: string): Promise<void> {
+    const res = await this.request({ type: "switch_session", sessionPath })
+    if (!res.success) throw new Error(`pi switch_session failed: ${res.error ?? JSON.stringify(res.data)}`)
+  }
+
+  async getMessages(): Promise<unknown> {
+    const res = await this.request({ type: "get_messages" })
+    if (!res.success) throw new Error(`pi get_messages failed: ${res.error ?? JSON.stringify(res.data)}`)
     return res.data
   }
 
