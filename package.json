@@ -2,7 +2,7 @@
   "name": "pi-acp",
   "version": "0.0.0",
   "private": true,
-  "description": "ACP adapter for pi-coding-agent",
+  "description": "ACP adapter for pi coding agent",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -14,7 +14,8 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "echo \"(todo)\"",
-    "test": "node --test"
+    "test": "node --test",
+    "smoke": "node scripts/smoke-acp.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.12.0",

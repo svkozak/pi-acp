@@ -38,7 +38,7 @@ export class PiAcpAgent implements ACPAgent {
     }
   }
 
-  async newSession(params: NewSessionRequest): Promise<{ sessionId: string }> {
+  async newSession(params: NewSessionRequest) {
     // For MVP we ignore mcpServers, but accept and store.
     const session = await this.sessions.create({
       cwd: params.cwd,
@@ -46,7 +46,19 @@ export class PiAcpAgent implements ACPAgent {
       conn: this.conn,
     })
 
-    return { sessionId: session.sessionId }
+    return {
+      sessionId: session.sessionId,
+      // Be explicit to satisfy clients that expect these fields.
+      models: {
+        availableModels: [],
+        currentModelId: "default",
+      },
+      modes: {
+        availableModes: [],
+        currentModeId: "default",
+      },
+      _meta: {},
+    }
   }
 
   async authenticate(_params: AuthenticateRequest) {
