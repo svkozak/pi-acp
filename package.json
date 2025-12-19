@@ -1,6 +1,6 @@
 {
   "name": "pi-acp",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "ACP adapter for pi coding agent",
   "license": "MIT",
