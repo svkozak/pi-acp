@@ -21,12 +21,42 @@ import { SessionStore } from "./session-store.js";
 import { PiRpcProcess } from "../pi-rpc/process.js";
 import { normalizePiAssistantText, normalizePiMessageText } from "./translate/pi-messages.js";
 import { promptToPiMessage } from "./translate/prompt.js";
-import { loadSlashCommands, toAvailableCommands } from "./slash-commands.js";
+import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from "./slash-commands.js";
 import { isAbsolute } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import type { AvailableCommand } from "@agentclientprotocol/sdk";
 import { dirname, join } from "node:path";
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+function builtinAvailableCommands(): AvailableCommand[] {
+  return [
+    {
+      name: "compact",
+      description: "Manually compact the session context",
+      input: { hint: "optional custom instructions" },
+    },
+    {
+      name: "autocompact",
+      description: "Toggle automatic context compaction",
+      input: { hint: "on|off|toggle" },
+    },
+  ];
+}
+
+function mergeCommands(a: AvailableCommand[], b: AvailableCommand[]): AvailableCommand[] {
+  // Preserve order, de-dupe by name (first wins).
+  const out: AvailableCommand[] = [];
+  const seen = new Set<string>();
+
+  for (const c of [...a, ...b]) {
+    if (seen.has(c.name)) continue;
+    seen.add(c.name);
+    out.push(c);
+  }
+
+  return out;
+}
 import { fileURLToPath } from "node:url";
 
 const pkg = readNearestPackageJson(import.meta.url);
@@ -102,7 +132,10 @@ export class PiAcpAgent implements ACPAgent {
         sessionId: session.sessionId,
         update: {
           sessionUpdate: "available_commands_update",
-          availableCommands: toAvailableCommands(fileCommands),
+          availableCommands: mergeCommands(
+            toAvailableCommands(fileCommands),
+            builtinAvailableCommands(),
+          ),
         },
       });
     }, 0);
@@ -119,6 +152,68 @@ export class PiAcpAgent implements ACPAgent {
     const session = this.sessions.get(params.sessionId);
 
     const { message, attachments } = promptToPiMessage(params.prompt);
+
+    // Built-in ACP slash command handling (headless-friendly subset).
+    // Note: file-based slash commands are expanded inside session.prompt().
+    if (attachments.length === 0 && message.trimStart().startsWith("/")) {
+      const trimmed = message.trim();
+      const space = trimmed.indexOf(" ");
+      const cmd = space === -1 ? trimmed.slice(1) : trimmed.slice(1, space);
+      const argsString = space === -1 ? "" : trimmed.slice(space + 1);
+      const args = parseCommandArgs(argsString);
+
+      if (cmd === "compact") {
+        const customInstructions = args.join(" ").trim() || undefined;
+        const res = await session.proc.compact(customInstructions);
+
+        const r: any = res && typeof res === "object" ? (res as any) : null;
+        const tokensBefore = typeof r?.tokensBefore === "number" ? r.tokensBefore : null;
+        const summary = typeof r?.summary === "string" ? r.summary : null;
+
+        const headerLines = [
+          `Compaction completed.${customInstructions ? " (custom instructions applied)" : ""}`,
+          tokensBefore !== null ? `Tokens before: ${tokensBefore}` : null,
+        ].filter(Boolean);
+
+        const text = headerLines.join("\n") + (summary ? `\n\n${summary}` : "");
+
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text },
+          },
+        });
+
+        return { stopReason: "end_turn" };
+      }
+
+      if (cmd === "autocompact") {
+        const mode = (args[0] ?? "toggle").toLowerCase();
+        let enabled: boolean | null = null;
+        if (mode === "on" || mode === "true" || mode === "enable" || mode === "enabled") enabled = true;
+        else if (mode === "off" || mode === "false" || mode === "disable" || mode === "disabled") enabled = false;
+
+        if (enabled === null) {
+          // toggle: read current state and invert.
+          const state = (await session.proc.getState()) as any;
+          const current = Boolean(state?.autoCompactionEnabled);
+          enabled = !current;
+        }
+
+        await session.proc.setAutoCompaction(enabled);
+
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `Auto-compaction ${enabled ? "enabled" : "disabled"}.` },
+          },
+        });
+
+        return { stopReason: "end_turn" };
+      }
+    }
 
     const result = await session.prompt(message, attachments);
 
@@ -223,7 +318,10 @@ export class PiAcpAgent implements ACPAgent {
         sessionId: session.sessionId,
         update: {
           sessionUpdate: "available_commands_update",
-          availableCommands: toAvailableCommands(fileCommands),
+          availableCommands: mergeCommands(
+            toAvailableCommands(fileCommands),
+            builtinAvailableCommands(),
+          ),
         },
       });
     }, 0);
