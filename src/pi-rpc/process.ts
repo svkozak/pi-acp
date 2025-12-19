@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import * as readline from "node:readline"
 
 type PiRpcCommand =
-  | { type: "prompt"; id?: string; message: string }
+  | { type: "prompt"; id?: string; message: string; attachments?: unknown[] }
   | { type: "abort"; id?: string }
   | { type: "get_state"; id?: string }
 
@@ -94,8 +94,8 @@ export class PiRpcProcess {
     }
   }
 
-  async prompt(message: string): Promise<void> {
-    const res = await this.request({ type: "prompt", message })
+  async prompt(message: string, attachments: unknown[] = []): Promise<void> {
+    const res = await this.request({ type: "prompt", message, attachments })
     if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
   }
 

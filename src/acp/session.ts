@@ -70,7 +70,7 @@ class PiAcpSession {
     this.proc.onEvent((ev) => this.handlePiEvent(ev))
   }
 
-  async prompt(message: string): Promise<StopReason> {
+  async prompt(message: string, attachments: unknown[] = []): Promise<StopReason> {
     if (this.pendingTurn) throw RequestError.invalidRequest("A prompt is already in progress")
 
     this.cancelRequested = false
@@ -80,7 +80,7 @@ class PiAcpSession {
     })
 
     // Kick off pi, but completion is determined by pi events (`turn_end`) not the RPC response.
-    this.proc.prompt(message).catch((err) => {
+    this.proc.prompt(message, attachments).catch((err) => {
       // If the subprocess errors before we get a `turn_end`, treat as error unless cancelled.
       const reason: StopReason = this.cancelRequested ? "cancelled" : "error"
       this.pendingTurn?.resolve(reason)
