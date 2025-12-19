@@ -28,6 +28,13 @@ type PendingTurn = {
   reject: (err: unknown) => void
 }
 
+type QueuedTurn = {
+  message: string
+  attachments: unknown[]
+  resolve: (reason: StopReason) => void
+  reject: (err: unknown) => void
+}
+
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
   private readonly store = new SessionStore()
@@ -103,8 +110,12 @@ export class PiAcpSession {
   private readonly fileCommands: FileSlashCommand[]
 
   // Used to map abort semantics to ACP stopReason.
+  // Applies to the currently running turn.
   private cancelRequested = false
+
+  // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
+  private readonly turnQueue: QueuedTurn[] = []
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
@@ -142,38 +153,62 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, attachments: unknown[] = []): Promise<StopReason> {
-    if (this.pendingTurn) throw RequestError.invalidRequest('A prompt is already in progress')
-
-    this.cancelRequested = false
-    this.inAgentLoop = false
-
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      this.pendingTurn = { resolve, reject }
-    })
+      const queued: QueuedTurn = { message: expandedMessage, attachments, resolve, reject }
 
-    // Kick off pi, but completion is determined by pi events, not the RPC response.
-    // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
-    // The full prompt is finished when we see `agent_end`.
-    this.proc.prompt(expandedMessage, attachments).catch(err => {
-      // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-        this.pendingTurn?.resolve(reason)
-        this.pendingTurn = null
-        this.inAgentLoop = false
-      })
-      void err
+      // If a turn is already running, enqueue.
+      if (this.pendingTurn) {
+        this.turnQueue.push(queued)
+
+        // Best-effort: notify client that a prompt was queued.
+        // This doesn't work in Zed yet, needs to be revisited
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: `Queued message (position ${this.turnQueue.length}).`
+          }
+        })
+
+        // Also publish queue depth via session info metadata.
+        // This also not visible in the client
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
+        })
+
+        return
+      }
+
+      // No turn is running; start immediately.
+      this.startTurn(queued)
     })
 
     return turnPromise
   }
 
   async cancel(): Promise<void> {
+    // Cancel current and clear any queued prompts.
     this.cancelRequested = true
+
+    if (this.turnQueue.length) {
+      const queued = this.turnQueue.splice(0, this.turnQueue.length)
+      for (const t of queued) t.resolve('cancelled')
+
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Cleared queued prompts.' }
+      })
+      this.emit({
+        sessionUpdate: 'session_info_update',
+        _meta: { piAcp: { queueDepth: 0, running: Boolean(this.pendingTurn) } }
+      })
+    }
+
+    // Abort the currently running turn (if any). If nothing is running, this is a no-op.
     await this.proc.abort()
   }
 
@@ -198,6 +233,41 @@ export class PiAcpSession {
 
   private async flushEmits(): Promise<void> {
     await this.lastEmit
+  }
+
+  private startTurn(t: QueuedTurn): void {
+    this.cancelRequested = false
+    this.inAgentLoop = false
+
+    this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+
+    // Publish queue depth (0 because we're starting the turn now).
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
+    })
+
+    // Kick off pi, but completion is determined by pi events, not the RPC response.
+    // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
+    // The full prompt is finished when we see `agent_end`.
+    this.proc.prompt(t.message, t.attachments).catch(err => {
+      // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
+      // Also ensure we flush any already-enqueued updates first.
+      void this.flushEmits().finally(() => {
+        const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
+        this.pendingTurn?.resolve(reason)
+        this.pendingTurn = null
+        this.inAgentLoop = false
+
+        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
+        // But we still clear the queueDepth metadata.
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+        })
+      })
+      void err
+    })
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
@@ -407,6 +477,21 @@ export class PiAcpSession {
           this.pendingTurn?.resolve(reason)
           this.pendingTurn = null
           this.inAgentLoop = false
+
+          // Start next queued prompt, if any.
+          const next = this.turnQueue.shift()
+          if (next) {
+            this.emit({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+            })
+            this.startTurn(next)
+          } else {
+            this.emit({
+              sessionUpdate: 'session_info_update',
+              _meta: { piAcp: { queueDepth: 0, running: false } }
+            })
+          }
         })
         break
       }

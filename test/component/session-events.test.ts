@@ -121,7 +121,7 @@ test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   assert.equal(reason, 'cancelled')
 })
 
-test('PiAcpSession: rejects concurrent prompt', async () => {
+test('PiAcpSession: queues concurrent prompt and starts it after agent_end', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -134,11 +134,28 @@ test('PiAcpSession: rejects concurrent prompt', async () => {
     fileCommands: []
   })
 
-  const first = session.prompt('hello')
-  await assert.rejects(() => session.prompt('again'), /invalid request/i)
+  const first = session.prompt('one')
+  const second = session.prompt('two')
+
+  // only the first prompt is forwarded immediately
+  assert.equal(proc.prompts.length, 1)
+  assert.equal(proc.prompts[0]!.message, 'one')
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
-  await first
+
+  const r1 = await first
+  assert.equal(r1, 'end_turn')
+
+  // queued prompt should start after agent_end
+  assert.equal(proc.prompts.length, 2)
+  assert.equal(proc.prompts[1]!.message, 'two')
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+
+  const r2 = await second
+  assert.equal(r2, 'end_turn')
 })

@@ -60,3 +60,7 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 ## Source control
 
 - **DO NOT** commit unless explicitly asked!
+
+## Client information
+
+- Current ACP client is Zed
