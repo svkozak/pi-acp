@@ -10,10 +10,37 @@ export function toolResultToText(result: unknown): string {
     if (texts.length) return texts.join('')
   }
 
+  const details = (result as any)?.details
+
   // Some pi tools return a unified diff in `details.diff`.
-  const diff = (result as any)?.details?.diff
+  const diff = details?.diff
   if (typeof diff === 'string' && diff.trim()) {
     return diff
+  }
+
+  // The bash tool frequently returns stdout/stderr in `details` rather than content blocks.
+  const stdout =
+    (typeof details?.stdout === 'string' ? details.stdout : undefined) ??
+    (typeof (result as any)?.stdout === 'string' ? (result as any).stdout : undefined) ??
+    (typeof details?.output === 'string' ? details.output : undefined) ??
+    (typeof (result as any)?.output === 'string' ? (result as any).output : undefined)
+
+  const stderr =
+    (typeof details?.stderr === 'string' ? details.stderr : undefined) ??
+    (typeof (result as any)?.stderr === 'string' ? (result as any).stderr : undefined)
+
+  const exitCode =
+    (typeof details?.exitCode === 'number' ? details.exitCode : undefined) ??
+    (typeof (result as any)?.exitCode === 'number' ? (result as any).exitCode : undefined) ??
+    (typeof details?.code === 'number' ? details.code : undefined) ??
+    (typeof (result as any)?.code === 'number' ? (result as any).code : undefined)
+
+  if ((typeof stdout === 'string' && stdout.trim()) || (typeof stderr === 'string' && stderr.trim())) {
+    const parts: string[] = []
+    if (typeof stdout === 'string' && stdout.trim()) parts.push(stdout)
+    if (typeof stderr === 'string' && stderr.trim()) parts.push(`stderr:\n${stderr}`)
+    if (typeof exitCode === 'number') parts.push(`exit code: ${exitCode}`)
+    return parts.join('\n\n').trimEnd()
   }
 
   try {

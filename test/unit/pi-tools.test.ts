@@ -21,3 +21,17 @@ test('toolResultToText: falls back to JSON', () => {
   const text = toolResultToText({ a: 1 })
   assert.match(text, /"a": 1/)
 })
+
+test('toolResultToText: extracts bash stdout/stderr from details', () => {
+  const text = toolResultToText({
+    details: {
+      stdout: 'ok\n',
+      stderr: 'warn\n',
+      exitCode: 0
+    }
+  })
+  assert.match(text, /ok/)
+  assert.match(text, /stderr:/)
+  assert.match(text, /warn/)
+  assert.match(text, /exit code: 0/)
+})
