@@ -4,4 +4,7 @@ node_modules
 dist
 *.log
 
+# ESLint cache
+.eslintcache
+
 /agentDocs
