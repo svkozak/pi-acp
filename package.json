@@ -13,7 +13,7 @@
     "build": "tsup",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "lint": "echo \"(todo)\"",
+    "lint": "eslint .",
     "test": "node --import tsx --test test/**/*.test.ts",
     "smoke": "node scripts/smoke-acp.mjs"
   },
@@ -22,9 +22,13 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.17.0",
     "@types/node": "^22.0.0",
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.18.0"
   }
 }
