@@ -48,7 +48,9 @@ npm install -g @mariozechner/pi-coding-agent
 
 ### Add pi-acp to your ACP client, e.g. [Zed](https://zed.dev/docs/agents/external-agents/)
 
-#### Running with `npx` (no global install needed):
+Add the following to your Zed `settngs.json`:
+
+#### Using with `npx` (no global install needed):
 
 ```json
   "agent_servers": {
