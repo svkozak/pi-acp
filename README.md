@@ -31,20 +31,21 @@ High-level mapping:
 - Slash commands
   - Loads file-based slash commands compatible with pi’s conventions
   - Adds a small set of built-in commands for headless/editor usage
+- Skills are loaded by pi directly and are available in acp sessions
 
 ## Prerequisites
 
-- Node.js 22+
-- `pi` installed and available on your `PATH` (the adapter runs the `pi` executable)
-  - Configure `pi` separately for your model providers/API keys
-
-## Install
-
-### Make sure pi is installed
+Make sure pi is installed
 
 ```bash
 npm install -g @mariozechner/pi-coding-agent
 ```
+
+- Node.js 22+
+- `pi` installed and available on your `PATH` (the adapter runs the `pi` executable)
+- Configure `pi` separately for your model providers/API keys
+
+## Install
 
 ### Add pi-acp to your ACP client, e.g. [Zed](https://zed.dev/docs/agents/external-agents/)
 
