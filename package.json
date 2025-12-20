@@ -3,6 +3,24 @@
   "version": "0.0.9",
   "description": "ACP adapter for pi coding agent",
   "license": "MIT",
+  "author": "Sergii Kozak <svkozak@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/svkozak/pi-acp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/svkozak/pi-acp/issues"
+  },
+  "homepage": "https://github.com/svkozak/pi-acp#readme",
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "pi-coding-agent",
+    "adapter"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "main": "dist/index.js",
   "bin": {
