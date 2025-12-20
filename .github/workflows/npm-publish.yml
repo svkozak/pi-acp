@@ -43,4 +43,4 @@ jobs:
           fi
 
       - name: Publish (npm Trusted Publishing)
-        run: npm publish
+        run: npm publish --provenance
