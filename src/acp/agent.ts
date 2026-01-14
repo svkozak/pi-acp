@@ -51,9 +51,14 @@ function builtinAvailableCommands(): AvailableCommand[] {
       description: 'Show session stats (messages, tokens, cost, session file)'
     },
     {
-      name: 'queue',
-      description: 'Set pi message queue mode (all | one-at-a-time(recommended))',
-      input: { hint: 'all | one-at-a-time' }
+      name: 'steering',
+      description: 'Get/set pi steering message delivery mode (how queued steering messages are delivered)',
+      input: { hint: '(no args to show) all | one-at-a-time' }
+    },
+    {
+      name: 'follow-up',
+      description: 'Get/set pi follow-up message delivery mode (how queued follow-up messages are delivered)',
+      input: { hint: '(no args to show) all | one-at-a-time' }
     },
     {
       name: 'changelog',
@@ -235,10 +240,10 @@ export class PiAcpAgent implements ACPAgent {
         return { stopReason: 'end_turn' }
       }
 
-      if (cmd === 'queue') {
+      if (cmd === 'steering') {
         const modeRaw = String(args[0] ?? '').toLowerCase()
         const state = (await session.proc.getState()) as any
-        const current = String(state?.followUpMode ?? state?.steeringMode ?? '')
+        const current = String(state?.steeringMode ?? '')
 
         // If no arg, just report current.
         if (!modeRaw) {
@@ -248,7 +253,7 @@ export class PiAcpAgent implements ACPAgent {
               sessionUpdate: 'agent_message_chunk',
               content: {
                 type: 'text',
-                text: `Queue mode: ${current || 'unknown'}`
+                text: `Steering mode: ${current || 'unknown'}`
               }
             }
           })
@@ -262,23 +267,67 @@ export class PiAcpAgent implements ACPAgent {
               sessionUpdate: 'agent_message_chunk',
               content: {
                 type: 'text',
-                text: 'Usage: /queue all | /queue one-at-a-time'
+                text: 'Usage: /steering all | /steering one-at-a-time'
               }
             }
           })
           return { stopReason: 'end_turn' }
         }
 
-        // pi 0.45+: queue handling is split into follow-up + steering modes.
-        // For the old /queue command, keep them in sync.
-        await session.proc.setFollowUpMode(modeRaw as 'all' | 'one-at-a-time')
         await session.proc.setSteeringMode(modeRaw as 'all' | 'one-at-a-time')
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
           update: {
             sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `Queue mode set to: ${modeRaw}` }
+            content: { type: 'text', text: `Steering mode set to: ${modeRaw}` }
+          }
+        })
+
+        return { stopReason: 'end_turn' }
+      }
+
+      if (cmd === 'follow-up') {
+        const modeRaw = String(args[0] ?? '').toLowerCase()
+        const state = (await session.proc.getState()) as any
+        const current = String(state?.followUpMode ?? '')
+
+        // If no arg, just report current.
+        if (!modeRaw) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: `Follow-up mode: ${current || 'unknown'}`
+              }
+            }
+          })
+          return { stopReason: 'end_turn' }
+        }
+
+        if (modeRaw !== 'all' && modeRaw !== 'one-at-a-time') {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'Usage: /follow-up all | /follow-up one-at-a-time'
+              }
+            }
+          })
+          return { stopReason: 'end_turn' }
+        }
+
+        await session.proc.setFollowUpMode(modeRaw as 'all' | 'one-at-a-time')
+
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Follow-up mode set to: ${modeRaw}` }
           }
         })
 
