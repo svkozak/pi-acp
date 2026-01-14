@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '24.x'
           registry-url: 'https://registry.npmjs.org'
 
       - run: npm install -g npm@latest
@@ -26,4 +26,4 @@ jobs:
       - run: npm ci
       - run: npm run build --if-present
       - run: npm test
-      - run: npm publish
+      - run: npm publish --provenance
