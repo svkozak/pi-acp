@@ -1,6 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 
+function stripAnsi(s: string): string {
+  // Basic ANSI escape stripping (colors, cursor movement, etc.)
+  return s.replace(/[\u001B\u009B][[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
+}
+
 type PiRpcCommand =
   | { type: 'prompt'; id?: string; message: string; attachments?: unknown[] }
   | { type: 'abort'; id?: string }
@@ -46,6 +51,7 @@ export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
+  private readonly preludeLines: string[] = []
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
@@ -57,7 +63,10 @@ export class PiRpcProcess {
       try {
         msg = JSON.parse(line)
       } catch {
-        // ignore malformed lines for now
+        // pi may emit a human-readable prelude on stdout before NDJSON starts.
+        // Capture it so the ACP adapter can surface it on session start.
+        const cleaned = stripAnsi(String(line)).trimEnd()
+        if (cleaned) this.preludeLines.push(cleaned)
         return
       }
 
@@ -125,6 +134,15 @@ export class PiRpcProcess {
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
     }
+  }
+
+  /**
+   * Human-readable stdout lines emitted before RPC NDJSON begins (e.g. Context/Skills/Extensions info).
+   * Themes are typically noisy/less useful for ACP, so callers can filter as needed.
+   */
+  consumePreludeLines(): string[] {
+    const lines = this.preludeLines.splice(0, this.preludeLines.length)
+    return lines
   }
 
   async prompt(message: string, attachments: unknown[] = []): Promise<void> {

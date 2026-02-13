@@ -23,9 +23,9 @@ import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
 import { isAbsolute } from 'node:path'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
-import { join, dirname } from 'node:path'
+import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
@@ -89,8 +89,9 @@ export class PiAcpAgent implements ACPAgent {
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()
 
-  constructor(conn: AgentSideConnection) {
+  constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
+    void _config
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -137,12 +138,25 @@ export class PiAcpAgent implements ACPAgent {
     const models = await getModelState(session.proc)
     const thinking = await getThinkingState(session.proc)
 
+    // In pi --mode rpc there typically is no human-readable prelude on stdout.
+    // So we synthesize a similar "startup info" block from local data and emit it.
+    const preludeText = buildStartupInfo({ cwd: params.cwd, fileCommands })
+    if (preludeText) session.setStartupInfo(preludeText)
+
     const response = {
       sessionId: session.sessionId,
       models,
       modes: thinking,
-      _meta: {}
+      _meta: {
+        piAcp: {
+          startupInfo: preludeText || null
+        }
+      }
     }
+
+    // Try to send it immediately after session/new returns; if the client ignores it,
+    // it will still be emitted as the first chunk of the first prompt.
+    setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
     // Advertise slash commands (ACP: available_commands_update)
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
@@ -647,11 +661,21 @@ export class PiAcpAgent implements ACPAgent {
     const models = await getModelState(proc)
     const thinking = await getThinkingState(proc)
 
+    // Emit a synthesized startup info block for loaded sessions too.
+    const preludeText = buildStartupInfo({ cwd: params.cwd, fileCommands })
+    if (preludeText) session.setStartupInfo(preludeText)
+
     const response = {
       models,
       modes: thinking,
-      _meta: {}
+      _meta: {
+        piAcp: {
+          startupInfo: preludeText || null
+        }
+      }
     }
+
+    setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
     // Advertise slash commands after the response so the client knows the session exists.
     setTimeout(() => {
@@ -808,6 +832,148 @@ async function getModelState(proc: PiRpcProcess): Promise<{
     availableModels,
     currentModelId
   }
+}
+
+function isSemver(v: string): boolean {
+  return /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(v)
+}
+
+function compareSemver(a: string, b: string): number {
+  // Very small comparator for x.y.z (ignores pre-release/build beyond making them "not greater" unless base differs)
+  const pa = a.split(/[.-]/).slice(0, 3).map(n => Number(n))
+  const pb = b.split(/[.-]/).slice(0, 3).map(n => Number(n))
+  for (let i = 0; i < 3; i++) {
+    const da = pa[i] ?? 0
+    const db = pb[i] ?? 0
+    if (da > db) return 1
+    if (da < db) return -1
+  }
+  return 0
+}
+
+function buildStartupInfo(opts: {
+  cwd: string
+  fileCommands: ReturnType<typeof loadSlashCommands>
+}): string {
+  void opts.fileCommands
+
+  const md: string[] = []
+
+  let updateNotice: string | null = null
+
+  // pi version header + update notice (best-effort, matches what users see in terminal startup)
+  try {
+    // No timeout here; in some environments process startup can be slow and we'd rather show the version.
+    const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
+    const installed = String(piVersion.stdout ?? '').trim().replace(/^v/i, '')
+    if (installed) {
+      md.push(`pi v${installed}`)
+      md.push('---')
+      md.push('')
+
+      // Best-effort update check against npm registry.
+      // Important: keep it fast to not slow down session/new.
+      try {
+        const latestRes = spawnSync('npm', ['view', '@mariozechner/pi-coding-agent', 'version'], {
+          encoding: 'utf-8',
+          timeout: 800
+        })
+        const latest = String(latestRes.stdout ?? '').trim().replace(/^v/i, '')
+
+        if (latest && isSemver(latest) && isSemver(installed) && compareSemver(latest, installed) > 0) {
+          updateNotice = `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @mariozechner/pi-coding-agent\``
+        }
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const addSection = (title: string, items: string[]) => {
+    const cleaned = items.map(s => s.trim()).filter(Boolean)
+    if (!cleaned.length) return
+
+    md.push(`## ${title}`)
+    for (const item of cleaned) md.push(`- ${item}`)
+    md.push('')
+  }
+
+  // Context
+  const contextItems: string[] = []
+  const contextPath = join(opts.cwd, 'AGENTS.md')
+  if (existsSync(contextPath)) contextItems.push(contextPath)
+  addSection('Context', contextItems)
+
+  // Skills
+  const skillsItems: string[] = []
+  const skillsDir = join(process.env.HOME ?? '', '.pi', 'agent', 'skills')
+  try {
+    const entries = readdirSync(skillsDir)
+    for (const e of entries) {
+      const p = join(skillsDir, e)
+      if (statSync(p).isDirectory()) {
+        const skillFile = join(p, 'SKILL.md')
+        if (existsSync(skillFile)) skillsItems.push(skillFile)
+      } else if (e === 'SKILL.md') {
+        skillsItems.push(p)
+      }
+    }
+  } catch {
+    // ignore
+  }
+  addSection('Skills', skillsItems)
+
+  // Prompts
+  const promptsItems: string[] = []
+  const promptsDir = join(process.env.HOME ?? '', '.pi', 'agent', 'prompts')
+  try {
+    const prompts = readdirSync(promptsDir).filter(f => f.endsWith('.md'))
+    for (const f of prompts) promptsItems.push(`/${basename(f, '.md')}`)
+  } catch {
+    // ignore
+  }
+  addSection('Prompts', promptsItems)
+
+  // Extensions
+  const extItems: string[] = []
+  const extDir = join(process.env.HOME ?? '', '.pi', 'agent', 'extensions')
+  try {
+    const exts = readdirSync(extDir).filter(f => f.endsWith('.ts') || f.endsWith('.js'))
+    for (const f of exts) extItems.push(join(extDir, f))
+  } catch {
+    // ignore
+  }
+
+  // Also show npm packages from pi settings (best-effort)
+  try {
+    const settingsPath = join(process.env.HOME ?? '', '.pi', 'agent', 'settings.json')
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as any
+    const pkgs: string[] = Array.isArray(settings?.packages) ? settings.packages : []
+    for (const pkg of pkgs) {
+      const s = String(pkg)
+      if (s.startsWith('npm:')) {
+        // Render a two-line bullet structure using markdown indentation.
+        extItems.push(`${s}\n  - index.ts`)
+      } else {
+        extItems.push(s)
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  addSection('Extensions', extItems)
+
+  if (updateNotice) {
+    md.push('---')
+    md.push(updateNotice)
+    md.push('')
+  }
+
+  // Do NOT include themes (per request).
+  return md.join('\n').trim() + '\n'
 }
 
 function readNearestPackageJson(metaUrl: string): {
