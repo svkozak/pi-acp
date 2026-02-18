@@ -61,7 +61,7 @@ Add the following to your Zed `settngs.json`:
       "command": "npx",
       "args": ["-y", "pi-acp"],
       "env": {
-        "PI_ACP_STARTUP_INFO": "true"
+        "PI_ACP_STARTUP_INFO": "true" // optional, "true" by default
       }
     }
   }
@@ -79,9 +79,7 @@ npm install -g pi-acp
       "type": "custom",
       "command": "pi-acp",
       "args": [],
-      "env": {
-        "PI_ACP_STARTUP_INFO": "true"
-      }
+      "env": {}
     }
   }
 ```
@@ -101,9 +99,7 @@ Point your ACP client to the built `dist/index.js`:
       "type": "custom",
       "command": "node",
       "args": ["/path/to/pi-acp/dist/index.js"],
-      "env": {
-        "PI_ACP_STARTUP_INFO": "true"
-      }
+      "env": {}
     }
   }
 ```
