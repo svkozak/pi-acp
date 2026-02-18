@@ -31,7 +31,8 @@ High-level mapping:
 - Slash commands
   - Loads file-based slash commands compatible with pi’s conventions
   - Adds a small set of built-in commands for headless/editor usage
-- Skills are loaded by pi directly and are available in acp sessions
+- Skills are loaded by pi directly and are available in ACP sessions
+- (Zed) On session start, `pi-acp` posts a markdown “startup info” block (pi version, context file, skills, prompts, extensions)
 
 ## Prerequisites
 
@@ -59,9 +60,11 @@ Add the following to your Zed `settngs.json`:
       "type": "custom",
       "command": "npx",
       "args": ["-y", "pi-acp"],
-      "env": {},
-    },
-  },
+      "env": {
+        "PI_ACP_STARTUP_INFO": "true"
+      }
+    }
+  }
 ```
 
 #### Global install
@@ -76,9 +79,11 @@ npm install -g pi-acp
       "type": "custom",
       "command": "pi-acp",
       "args": [],
-      "env": {},
-    },
-  },
+      "env": {
+        "PI_ACP_STARTUP_INFO": "true"
+      }
+    }
+  }
 ```
 
 #### From source
@@ -96,12 +101,30 @@ Point your ACP client to the built `dist/index.js`:
       "type": "custom",
       "command": "node",
       "args": ["/path/to/pi-acp/dist/index.js"],
-      "env": {},
-    },
-  },
+      "env": {
+        "PI_ACP_STARTUP_INFO": "true"
+      }
+    }
+  }
 ```
 
 ## Features
+
+### Startup info message (Zed)
+
+By default, `pi-acp` emits a short markdown “startup info” block into the session (pi version, context, skills, prompts, extensions).
+
+Disable it by setting:
+
+- `PI_ACP_STARTUP_INFO=false`
+
+In Zed:
+
+```json
+"env": {
+  "PI_ACP_STARTUP_INFO": "false"
+}
+```
 
 ### Slash commands
 
