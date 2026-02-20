@@ -34,7 +34,7 @@ High-level mapping:
 - Skills are loaded by pi directly and are available in ACP sessions
 - (Zed) On session start, `pi-acp` posts a markdown “startup info” block (pi version, context file, skills, prompts, extensions)
 - (Zed) By default, `pi-acp` emits a short markdown “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting: `PI_ACP_STARTUP_INFO=false` (see below)
-- (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0)
+- (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
 ## Prerequisites
 
@@ -171,7 +171,7 @@ Project layout:
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
-- ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~ Session loading / history is now supported (in Zed) and maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
+- ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
 
 ## License
 
