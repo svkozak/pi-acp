@@ -1,6 +1,18 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 
+export class PiRpcSpawnError extends Error {
+  /** Underlying spawn error code, e.g. ENOENT, EACCES */
+  code?: string
+
+  constructor(message: string, opts?: { code?: string; cause?: unknown }) {
+    super(message)
+    this.name = 'PiRpcSpawnError'
+    this.code = opts?.code
+    ;(this as any).cause = opts?.cause
+  }
+}
+
 function stripAnsi(s: string): string {
   // Basic ANSI escape stripping (colors, cursor movement, etc.)
   return s.replace(/[\u001B\u009B][[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
@@ -90,6 +102,11 @@ export class PiRpcProcess {
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
+
+    child.on('error', err => {
+      for (const [, p] of this.pending) p.reject(err)
+      this.pending.clear()
+    })
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
@@ -103,6 +120,42 @@ export class PiRpcProcess {
       stdio: 'pipe',
       env: process.env
     })
+
+    // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
+    // deterministic error instead of later EPIPE/internal-error noise.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onSpawn = () => {
+          cleanup()
+          resolve()
+        }
+        const onError = (err: any) => {
+          cleanup()
+          reject(err)
+        }
+        const cleanup = () => {
+          child.off('spawn', onSpawn)
+          child.off('error', onError)
+        }
+
+        child.once('spawn', onSpawn)
+        child.once('error', onError)
+      })
+    } catch (e: any) {
+      const code = typeof e?.code === 'string' ? e.code : undefined
+      if (code === 'ENOENT') {
+        throw new PiRpcSpawnError(
+          `Could not start pi: executable not found (command: ${cmd}). Pi needs to be installed before it can run in ACP clients. Install it via \`npm install -g @mariozechner/pi-coding-agent\` or ensure \`pi\` is on your PATH. Then try again.`,
+          { code, cause: e }
+        )
+      }
+
+      if (code === 'EACCES') {
+        throw new PiRpcSpawnError(`Could not start pi: permission denied (command: ${cmd}).`, { code, cause: e })
+      }
+
+      throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
+    }
 
     child.stderr.on('data', () => {
       // leave stderr untouched; ACP clients may capture it.
@@ -133,6 +186,15 @@ export class PiRpcProcess {
     this.eventHandlers.push(handler)
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
+    }
+  }
+
+  dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
+    if (this.child.killed) return
+    try {
+      this.child.kill(signal as any)
+    } catch {
+      // ignore
     }
   }
 
@@ -231,12 +293,18 @@ export class PiRpcProcess {
 
     return new Promise<PiRpcResponse>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
-      this.child.stdin.write(line, err => {
-        if (err) {
-          this.pending.delete(id)
-          reject(err)
-        }
-      })
+
+      try {
+        this.child.stdin.write(line, err => {
+          if (err) {
+            this.pending.delete(id)
+            reject(err)
+          }
+        })
+      } catch (e) {
+        this.pending.delete(id)
+        reject(e)
+      }
     })
   }
 }

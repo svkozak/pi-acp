@@ -154,6 +154,20 @@ Other built-in commands:
 
 The rest are not yet implemented due to ACP limitations (e.g. no history)
 
+## Authentication / Setup (ACP Registry)
+
+This agent supports **Terminal Auth** for the ACP Registry.
+
+In Zed, this will show an **Authenticate** banner that launches pi in a terminal.
+
+Launch pi in a terminal for interactive login/setup:
+
+```bash
+pi-acp --terminal-login
+```
+
+Your ACP client can also invoke this automatically based on the agent's advertised `authMethods`.
+
 ## Development
 
 ```bash

@@ -19,6 +19,7 @@ import {
   type SetSessionModeResponse,
   type StopReason
 } from '@agentclientprotocol/sdk'
+import { getAuthMethods } from './auth.js'
 import { SessionManager } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
@@ -32,6 +33,7 @@ import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from 'n
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { hasAnyPiAuthConfigured } from '../pi-auth/status.js'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -123,7 +125,11 @@ export class PiAcpAgent implements ACPAgent {
         title: 'pi ACP adapter',
         version: pkg.version ?? '0.0.0'
       },
-      authMethods: [],
+      // Zed currently uses ClientCapabilities._meta["terminal-auth"] to decide whether to show
+      // the "Authenticate" banner/button. If not supported, we still return the method for the registry.
+      authMethods: getAuthMethods({
+        supportsTerminalAuthMeta: (params as any)?.clientCapabilities?._meta?.['terminal-auth'] === true
+      }),
       agentCapabilities: {
         loadSession: true,
         mcpCapabilities: { http: false, sse: false },
@@ -148,6 +154,16 @@ export class PiAcpAgent implements ACPAgent {
 
     this.lastSessionCwd = params.cwd
 
+    // IMPORTANT: pi exits immediately in --mode rpc if no model is available (no auth configured).
+    // So we must detect that situation without spawning pi, and return AUTH_REQUIRED so clients
+    // (e.g. Zed) can show the Authenticate banner and launch a terminal login.
+    if (!hasAnyPiAuthConfigured()) {
+      throw RequestError.authRequired(
+        { authMethods: getAuthMethods() },
+        'Configure an API key or log in with an OAuth provider.'
+      )
+    }
+
     const fileCommands = loadSlashCommands(params.cwd)
 
     // Pi doesn't support mcpServers, but we accept and store.
@@ -155,8 +171,30 @@ export class PiAcpAgent implements ACPAgent {
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       conn: this.conn,
-      fileCommands
+      fileCommands,
+      piCommand: process.env.PI_ACP_PI_COMMAND
     })
+
+    // Proactive auth gate: if pi has no models available, it's effectively unauthenticated.
+    let rawModelsCount = 0
+    try {
+      const data = (await session.proc.getAvailableModels()) as any
+      rawModelsCount = Array.isArray(data?.models) ? data.models.length : 0
+    } catch {
+      // ignore
+    }
+
+    if (rawModelsCount === 0) {
+      try {
+        session.proc.dispose?.()
+      } catch {
+        // ignore
+      }
+      throw RequestError.authRequired(
+        { authMethods: getAuthMethods() },
+        'Configure an API key or log in with an OAuth provider.'
+      )
+    }
 
     const models = await getModelState(session.proc)
     const thinking = await getThinkingState(session.proc)
@@ -200,7 +238,8 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async authenticate(_params: AuthenticateRequest) {
-    // MVP: no auth.
+    // Terminal Auth is handled out-of-band by re-launching the binary with `--terminal-login`.
+    // If the client calls `authenticate` anyway, we can no-op successfully.
     return
   }
 
@@ -661,10 +700,19 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     // Spawn pi and point it directly at the session file.
-    const proc = await PiRpcProcess.spawn({
-      cwd: params.cwd,
-      sessionPath: sessionFile
-    })
+    let proc: PiRpcProcess
+    try {
+      proc = await PiRpcProcess.spawn({
+        cwd: params.cwd,
+        sessionPath: sessionFile,
+        piCommand: process.env.PI_ACP_PI_COMMAND
+      })
+    } catch (e: any) {
+      if (e?.name === 'PiRpcSpawnError') {
+        throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
+      }
+      throw e
+    }
 
     const fileCommands = loadSlashCommands(params.cwd)
 

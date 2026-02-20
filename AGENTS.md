@@ -56,7 +56,7 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 - Keep pi RPC subprocess logic in `src/pi-rpc/*`.
 - Prefer small translation functions (pi event → ACP session/update) with unit tests.
 - Be strict about streaming and process cleanup (handle exit, drain stdout/stderr, timeouts).
-- Avoid producing unnecessary comments
+- Avoid producing unnecessary comments! Use comments sparingly to explain non-obvious decisions, not to narrate code.
 
 ## Source control
 

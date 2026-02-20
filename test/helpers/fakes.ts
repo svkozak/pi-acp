@@ -42,7 +42,7 @@ export class FakePiRpcProcess {
   }
 
   async getAvailableModels(): Promise<any> {
-    return { models: [] }
+    return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
   }
 
   async getMessages(): Promise<any> {

@@ -31,7 +31,7 @@ test('PiAcpAgent: PI_ACP_STARTUP_INFO=false disables startup info generation/emi
       cwd: process.cwd(),
       proc: {
         async getAvailableModels() {
-          return { models: [] }
+          return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
         },
         async getState() {
           return {

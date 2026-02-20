@@ -7,9 +7,10 @@ import type {
   ToolKind
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
+import { maybeAuthRequiredError } from './auth-required.js'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
-import { PiRpcProcess, type PiRpcEvent } from '../pi-rpc/process.js'
+import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
 import { SessionStore } from './session-store.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -19,6 +20,7 @@ type SessionCreateParams = {
   mcpServers: McpServer[]
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
+  piCommand?: string
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -47,11 +49,26 @@ export class SessionManager {
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
-    const proc = await PiRpcProcess.spawn({
-      cwd: params.cwd
-    })
+    let proc: PiRpcProcess
+    try {
+      proc = await PiRpcProcess.spawn({
+        cwd: params.cwd,
+        piCommand: params.piCommand
+      })
+    } catch (e) {
+      if (e instanceof PiRpcSpawnError) {
+        throw RequestError.internalError({ code: e.code }, e.message)
+      }
+      throw e
+    }
 
-    const state = (await proc.getState()) as any
+    let state: any = null
+    try {
+      state = (await proc.getState()) as any
+    } catch {
+      state = null
+    }
+
     const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
     const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
 
@@ -286,8 +303,15 @@ export class PiAcpSession {
       // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
       void this.flushEmits().finally(() => {
-        const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-        this.pendingTurn?.resolve(reason)
+        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
+        const authErr = maybeAuthRequiredError(err)
+        if (authErr) {
+          this.pendingTurn?.reject(authErr)
+        } else {
+          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
+          this.pendingTurn?.resolve(reason)
+        }
+
         this.pendingTurn = null
         this.inAgentLoop = false
 
