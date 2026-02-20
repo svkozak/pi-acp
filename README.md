@@ -6,7 +6,7 @@ ACP ([Agent Client Protocol](https://agentclientprotocol.com/overview/introducti
 
 ## Status
 
-This is an MVP-style adapter intended to be useful today and easy to iterate on. Some ACP features may not be unimplemented or are not supported (see [Limitations](#limitations)). Development is centered around Zed editor support, other clients may have varying levels of compatibility.
+This is an MVP-style adapter intended to be useful today and easy to iterate on. Some ACP features may be not implemented or are not supported (see [Limitations](#limitations)). Development is centered around Zed editor support, other clients may have varying levels of compatibility.
 
 ## How it works
 
