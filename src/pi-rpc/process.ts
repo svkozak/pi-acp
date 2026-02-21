@@ -13,9 +13,17 @@ export class PiRpcSpawnError extends Error {
   }
 }
 
+const ESC = String.fromCharCode(0x1b)
+const CSI = String.fromCharCode(0x9b)
+
+const ANSI_ESCAPE_REGEX = new RegExp(
+  `[${ESC}${CSI}][[\\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]`,
+  'g'
+)
+
 function stripAnsi(s: string): string {
   // Basic ANSI escape stripping (colors, cursor movement, etc.)
-  return s.replace(/[\u001B\u009B][[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
+  return s.replace(ANSI_ESCAPE_REGEX, '')
 }
 
 type PiRpcCommand =
@@ -39,6 +47,8 @@ type PiRpcCommand =
   | { type: 'switch_session'; id?: string; sessionPath: string }
   // Messages
   | { type: 'get_messages'; id?: string }
+  // Commands
+  | { type: 'get_commands'; id?: string }
 
 type PiRpcResponse = {
   type: 'response'
@@ -282,6 +292,12 @@ export class PiRpcProcess {
   async getMessages(): Promise<unknown> {
     const res = await this.request({ type: 'get_messages' })
     if (!res.success) throw new Error(`pi get_messages failed: ${res.error ?? JSON.stringify(res.data)}`)
+    return res.data
+  }
+
+  async getCommands(): Promise<unknown> {
+    const res = await this.request({ type: 'get_commands' })
+    if (!res.success) throw new Error(`pi get_commands failed: ${res.error ?? JSON.stringify(res.data)}`)
     return res.data
   }
 

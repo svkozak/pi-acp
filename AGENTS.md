@@ -35,7 +35,8 @@ Use `@agentclientprotocol/sdk`:
 - Run in dev: `npm run dev`
 - Build: `npm run build`
 - Smoke test (stdio): `npm run smoke`
-- Lint/test: `npm test`
+- Lint: `npm run lint`
+- Test: `npm run test`
 
 ## Manual testing notes
 

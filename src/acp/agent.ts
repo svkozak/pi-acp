@@ -28,6 +28,8 @@ import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi
 import { toolResultToText } from './translate/pi-tools.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
+import { getAgentDir, getEnableSkillCommands } from './pi-settings.js'
+import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
@@ -165,6 +167,7 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const fileCommands = loadSlashCommands(params.cwd)
+    const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
     // Pi doesn't support mcpServers, but we accept and store.
     const session = await this.sessions.create({
@@ -225,13 +228,34 @@ export class PiAcpAgent implements ACPAgent {
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
     // So we must send this *after* the session/new response has been delivered.
     setTimeout(() => {
-      void this.conn.sessionUpdate({
-        sessionId: session.sessionId,
-        update: {
-          sessionUpdate: 'available_commands_update',
-          availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+      void (async () => {
+        try {
+          const pi = (await session.proc.getCommands()) as any
+          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
+            enableSkillCommands,
+            includeExtensionCommands: false
+          })
+
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'available_commands_update',
+              availableCommands: mergeCommands(commands, builtinAvailableCommands())
+            }
+          })
+          return
+        } catch {
+          // Fall back to file-based prompt templates (legacy behavior).
         }
-      })
+
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+          }
+        })
+      })()
     }, 0)
 
     return response
@@ -715,6 +739,7 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const fileCommands = loadSlashCommands(params.cwd)
+    const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
     const session = this.sessions.getOrCreate(params.sessionId, {
       cwd: params.cwd,
@@ -812,13 +837,34 @@ export class PiAcpAgent implements ACPAgent {
 
     // Advertise slash commands after the response so the client knows the session exists.
     setTimeout(() => {
-      void this.conn.sessionUpdate({
-        sessionId: session.sessionId,
-        update: {
-          sessionUpdate: 'available_commands_update',
-          availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+      void (async () => {
+        try {
+          const pi = (await proc.getCommands()) as any
+          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
+            enableSkillCommands,
+            includeExtensionCommands: false
+          })
+
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'available_commands_update',
+              availableCommands: mergeCommands(commands, builtinAvailableCommands())
+            }
+          })
+          return
+        } catch {
+          // fall back
         }
-      })
+
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+          }
+        })
+      })()
     }, 0)
 
     return response
@@ -1098,8 +1144,13 @@ function buildStartupInfo(opts: { cwd: string; fileCommands: ReturnType<typeof l
   }
 
   // Global skills
-  const globalSkillsDir = join(process.env.HOME ?? '', '.pi', 'agent', 'skills')
+  // Use getAgentDir() so this respects PI_CODING_AGENT_DIR overrides.
+  const globalSkillsDir = join(getAgentDir(), 'skills')
   pushSkillFromRoot(globalSkillsDir)
+
+  // Also support ~/.agents/skills (pi skill discovery)
+  const legacyAgentsSkillsDir = join(process.env.HOME ?? '', '.agents', 'skills')
+  pushSkillFromRoot(legacyAgentsSkillsDir)
 
   // Project skills (.pi/skills)
   const projectSkillsDir = join(opts.cwd, '.pi', 'skills')

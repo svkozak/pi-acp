@@ -136,6 +136,12 @@ Other built-in commands:
 - `/thinking` - maps to 'mode' selector in Zed
 - `/clear` - not implemented (use ACP client 'new' command)
 
+#### 3) Skill commands
+
+- Skill commands can be enabled in pi settings and will appear in the slash command list in ACP host as `/skill:skill-name`.
+
+**Note**: Slash commands provided by pi extensions are not currently supported.
+
 ## Authentication / Setup (ACP Registry)
 
 This agent supports **Terminal Auth** for the ACP Registry.
