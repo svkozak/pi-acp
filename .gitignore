@@ -8,3 +8,4 @@ dist
 .eslintcache
 
 /agentDocs
+.DS_Store
