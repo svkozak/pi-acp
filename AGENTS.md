@@ -44,7 +44,7 @@ Once the adapter runs, it should behave like an ACP agent on stdio.
 
 Quick sanity test (example):
 
-```bash
+```bashN
 # Send initialize request via stdin (exact fields depend on ACP SDK version)
 # echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}' | node dist/index.js
 ```
@@ -66,3 +66,8 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 ## Client information
 
 - Current ACP client is Zed
+
+## References
+
+- ACP spec: https://agentclientprotocol.com/get-started/introduction
+- Local ACP repo with docs: `~/Dev/learning/agent-client-protocol`
