@@ -1,6 +1,6 @@
 {
   "name": "pi-acp",
-  "version": "0.0.19",
+  "version": "0.0.20",
   "description": "ACP adapter for pi coding agent",
   "license": "MIT",
   "author": "Sergii Kozak <svkozak@gmail.com>",
