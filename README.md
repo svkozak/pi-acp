@@ -6,19 +6,7 @@ ACP ([Agent Client Protocol](https://agentclientprotocol.com/overview/introducti
 
 ## Status
 
-This is an MVP-style adapter intended to be useful today and easy to iterate on. Some ACP features may be not implemented or are not supported (see [Limitations](#limitations)). Development is centered around Zed editor support, other clients may have varying levels of compatibility.
-
-## How it works
-
-- **ACP side:** JSON-RPC 2.0 over stdio using `@agentclientprotocol/sdk`
-- **Pi side:** spawns `pi --mode rpc` and communicates via newline-delimited JSON on stdio
-- **Session model:** 1 ACP session ↔ 1 `pi` subprocess
-
-High-level mapping:
-
-- `session/new` → spawn `pi --mode rpc` (working directory = `cwd`)
-- `session/prompt` → send `{ type: "prompt", message, images }` to pi and stream events back as `session/update`
-- `session/cancel` → send `{ type: "abort" }`
+This is an MVP-style adapter intended to be useful today and easy to iterate on. Some ACP features may be not implemented or are not supported (see [Limitations](#limitations)). Development is centered around [Zed](https://zed.dev) editor support, other clients may have varying levels of compatibility.
 
 ## Features
 
@@ -31,8 +19,8 @@ High-level mapping:
 - Slash commands
   - Loads file-based slash commands compatible with pi’s conventions
   - Adds a small set of built-in commands for headless/editor usage
+  - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
-- (Zed) On session start, `pi-acp` posts a markdown “startup info” block (pi version, context file, skills, prompts, extensions)
 - (Zed) By default, `pi-acp` emits a short markdown “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting: `PI_ACP_STARTUP_INFO=false` (see below)
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
@@ -138,16 +126,14 @@ Other built-in commands:
 
 #### 3) Skill commands
 
-- Skill commands can be enabled in pi settings and will appear in the slash command list in ACP host as `/skill:skill-name`.
+- Skill commands can be enabled in pi settings and will appear in the slash command list in ACP client as `/skill:skill-name`.
 
 **Note**: Slash commands provided by pi extensions are not currently supported.
 
-## Authentication / Setup (ACP Registry)
+## Authentication (ACP Registry support)
 
-This agent supports **Terminal Auth** for the ACP Registry.
-
+This agent supports **Terminal Auth** for the [ACP Registry](https://agentclientprotocol.com/get-started/registry).
 In Zed, this will show an **Authenticate** banner that launches pi in a terminal.
-
 Launch pi in a terminal for interactive login/setup:
 
 ```bash
@@ -163,7 +149,7 @@ npm install
 npm run dev        # run from src via tsx
 npm run build
 npm run lint
-npm test
+npm run test
 ```
 
 Project layout:
@@ -174,7 +160,7 @@ Project layout:
 ## Limitations
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
-- MCP servers are accepted in ACP params and stored in session state, but not wired through to pi.
+- MCP servers are accepted in ACP params and stored in session state, but not wired through to pi (see [why](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/)). If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
