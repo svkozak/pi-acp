@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.12.0",
+    "ws": "^8.18.3",
     "zod": "^3.25.0"
   },
   "devDependencies": {

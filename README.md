@@ -158,6 +158,19 @@ Project layout:
 - `src/acp/*` – ACP server + translation layer
 - `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol)
 
+## WS server mode (experimental)
+
+In addition to stdio mode, `pi-acp` can run as a websocket ACP server.
+
+```bash
+node dist/index.js --ws --host=127.0.0.1 --port=8765
+```
+
+Env alternatives:
+
+- `PI_ACP_WS_HOST`
+- `PI_ACP_WS_PORT`
+
 ## Limitations
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.

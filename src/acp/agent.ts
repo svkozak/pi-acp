@@ -4,6 +4,8 @@ import {
   type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
+  type ForkSessionRequest,
+  type ForkSessionResponse,
   type InitializeRequest,
   type InitializeResponse,
   type ListSessionsRequest,
@@ -14,6 +16,8 @@ import {
   type NewSessionRequest,
   type PromptRequest,
   type PromptResponse,
+  type ResumeSessionRequest,
+  type ResumeSessionResponse,
   type SessionInfo,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
@@ -36,6 +40,7 @@ import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { hasAnyPiAuthConfigured } from '../pi-auth/status.js'
+import { mkdirSync, copyFileSync, openSync, readSync, writeSync, closeSync } from 'node:fs'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -118,6 +123,13 @@ export class PiAcpAgent implements ACPAgent {
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
+
+    const closed = (this.conn as any).closed
+    if (closed && typeof closed.finally === 'function') {
+      void closed.finally(() => {
+        this.sessions.disposeAll()
+      })
+    }
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -148,9 +160,59 @@ export class PiAcpAgent implements ACPAgent {
         sessionCapabilities: {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
-          list: {}
+          list: {},
+          resume: {},
+          fork: {}
         }
       }
+    }
+  }
+
+  async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+    if (!isAbsolute(params.cwd)) {
+      throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
+    }
+
+    this.lastSessionCwd = params.cwd
+
+    const stored = this.store.get(params.sessionId)
+    const sourceSessionFile = stored?.sessionFile ?? findPiSessionFile(params.sessionId)
+    if (!sourceSessionFile) {
+      throw RequestError.invalidParams(`Unknown sessionId: ${params.sessionId}`)
+    }
+
+    const forkSessionId = crypto.randomUUID()
+    const forkSessionFile = this.createForkSessionFile(sourceSessionFile, forkSessionId, params.cwd)
+
+    const proc = await PiRpcProcess.spawn({
+      cwd: params.cwd,
+      sessionPath: forkSessionFile,
+      piCommand: process.env.PI_ACP_PI_COMMAND
+    })
+
+    const fileCommands = loadSlashCommands(params.cwd)
+
+    this.sessions.getOrCreate(forkSessionId, {
+      cwd: params.cwd,
+      mcpServers: params.mcpServers,
+      conn: this.conn,
+      proc,
+      fileCommands
+    })
+
+    this.store.upsert({
+      sessionId: forkSessionId,
+      cwd: params.cwd,
+      sessionFile: forkSessionFile
+    })
+
+    const models = await getModelState(proc)
+    const thinking = await getThinkingState(proc)
+
+    return {
+      sessionId: forkSessionId,
+      models,
+      modes: thinking
     }
   }
 
@@ -926,6 +988,20 @@ export class PiAcpAgent implements ACPAgent {
     return response
   }
 
+  async unstable_resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+    const res = await this.loadSession({
+      cwd: params.cwd,
+      sessionId: params.sessionId,
+      mcpServers: params.mcpServers
+    })
+
+    return {
+      models: res.models,
+      modes: res.modes,
+      sessionId: params.sessionId
+    }
+  }
+
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
     const session = this.sessions.get(params.sessionId)
 
@@ -980,6 +1056,40 @@ export class PiAcpAgent implements ACPAgent {
     })
 
     return {}
+  }
+
+  private createForkSessionFile(sourcePath: string, newSessionId: string, cwd: string): string {
+    const dir = dirname(sourcePath)
+    mkdirSync(dir, { recursive: true })
+    const targetPath = join(dir, `${newSessionId}.jsonl`)
+    copyFileSync(sourcePath, targetPath)
+
+    const fd = openSync(targetPath, 'r+')
+    try {
+      const buf = Buffer.alloc(64 * 1024)
+      const n = readSync(fd, buf, 0, buf.length, 0)
+      if (n <= 0) return targetPath
+      const chunk = buf.subarray(0, n).toString('utf8')
+      const newline = chunk.indexOf('\n')
+      if (newline === -1) return targetPath
+      const first = chunk.slice(0, newline)
+      const rest = chunk.slice(newline + 1)
+
+      const parsed = JSON.parse(first) as any
+      if (parsed?.type === 'session') {
+        parsed.id = newSessionId
+        parsed.cwd = cwd
+        const newFirst = JSON.stringify(parsed)
+        const rewritten = `${newFirst}\n${rest}`
+        writeSync(fd, Buffer.from(rewritten, 'utf8'), 0, Buffer.byteLength(rewritten), 0)
+      }
+    } catch {
+      // ignore, fallback to copied file
+    } finally {
+      closeSync(fd)
+    }
+
+    return targetPath
   }
 }
 
