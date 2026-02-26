@@ -12,7 +12,9 @@ class FakeSessions {
 
 test('PiAcpAgent: PI_ACP_STARTUP_INFO=false disables startup info generation/emission', async () => {
   const prev = process.env.PI_ACP_STARTUP_INFO
+  const prevKey = process.env.OPENAI_API_KEY
   process.env.PI_ACP_STARTUP_INFO = 'false'
+  process.env.OPENAI_API_KEY = 'test-key'
 
   // Spy on setTimeout calls (agent schedules startup info + available commands)
   const realSetTimeout = globalThis.setTimeout
@@ -60,6 +62,8 @@ test('PiAcpAgent: PI_ACP_STARTUP_INFO=false disables startup info generation/emi
     assert.equal(timeouts.length, 1)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
+    if (prevKey == null) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = prevKey
     if (prev == null) delete process.env.PI_ACP_STARTUP_INFO
     else process.env.PI_ACP_STARTUP_INFO = prev
   }

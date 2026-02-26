@@ -115,6 +115,11 @@ export class SessionManager {
     this.sessions.set(sessionId, session)
     return session
   }
+
+  disposeAll(): void {
+    for (const [, s] of this.sessions) s.dispose()
+    this.sessions.clear()
+  }
 }
 
 export class PiAcpSession {
@@ -265,6 +270,10 @@ export class PiAcpSession {
     return this.cancelRequested
   }
 
+  dispose(): void {
+    this.proc.dispose('SIGTERM')
+  }
+
   private emit(update: SessionUpdate): void {
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
@@ -397,7 +406,16 @@ export class PiAcpSession {
           break
         }
 
-        // (MVP) ignore other delta types (thinking, etc.) for now.
+        if (
+          (ame?.type === 'thinking_delta' || ame?.type === 'reasoning_delta' || ame?.type === 'thought_delta') &&
+          typeof ame.delta === 'string'
+        ) {
+          this.emit({
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: ame.delta } satisfies ContentBlock
+          })
+        }
+
         break
       }
 

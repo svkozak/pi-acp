@@ -11,6 +11,9 @@ class FakeSessions {
 }
 
 test('PiAcpAgent: newSession throws AUTH_REQUIRED when pi reports zero available models', async () => {
+  const prevKey = process.env.OPENAI_API_KEY
+  process.env.OPENAI_API_KEY = 'test-key'
+
   const conn = new FakeAgentSideConnection()
 
   const session = {
@@ -33,15 +36,20 @@ test('PiAcpAgent: newSession throws AUTH_REQUIRED when pi reports zero available
   const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
   ;(agent as any).sessions = new FakeSessions(session) as any
 
-  let threw = false
   try {
-    await agent.newSession({ cwd: process.cwd(), mcpServers: [] } as any)
-  } catch (e: any) {
-    threw = true
-    assert.equal(e?.code, -32000)
-    assert.match(String(e?.message), /Configure an API key or log in with an OAuth provider/i)
-  }
+    let threw = false
+    try {
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] } as any)
+    } catch (e: any) {
+      threw = true
+      assert.equal(e?.code, -32000)
+      assert.match(String(e?.message), /Configure an API key or log in with an OAuth provider/i)
+    }
 
-  assert.equal(threw, true)
-  assert.equal((session.proc as any).disposeCalled, 1)
+    assert.equal(threw, true)
+    assert.equal((session.proc as any).disposeCalled, 1)
+  } finally {
+    if (prevKey == null) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = prevKey
+  }
 })
