@@ -21,7 +21,7 @@ This is an MVP-style adapter intended to be useful today and easy to iterate on.
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
-- (Zed) By default, `pi-acp` emits a short markdown “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting: `PI_ACP_STARTUP_INFO=false` (see below)
+- (Zed) `pi-acp` emits a short markdown “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
 ## Prerequisites
@@ -50,9 +50,7 @@ Add the following to your Zed `settngs.json`:
       "type": "custom",
       "command": "npx",
       "args": ["-y", "pi-acp"],
-      "env": {
-        "PI_ACP_STARTUP_INFO": "true" // optional, "true" by default
-      }
+      "env": {}
     }
   }
 ```

@@ -28,7 +28,7 @@ import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi
 import { toolResultToText } from './translate/pi-tools.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
-import { getAgentDir, getEnableSkillCommands } from './pi-settings.js'
+import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from 'node:fs'
@@ -39,14 +39,6 @@ import { hasAnyPiAuthConfigured } from '../pi-auth/status.js'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
-function booleanEnv(name: string, defaultValue: boolean): boolean {
-  const raw = process.env[name]
-  if (raw == null) return defaultValue
-  const v = String(raw).trim().toLowerCase()
-  if (v === 'true') return true
-  if (v === 'false') return false
-  return defaultValue
-}
 
 function builtinAvailableCommands(): AvailableCommand[] {
   return [
@@ -207,11 +199,17 @@ export class PiAcpAgent implements ACPAgent {
     const models = await getModelState(session.proc)
     const thinking = await getThinkingState(session.proc)
 
-    const showStartupInfo = booleanEnv('PI_ACP_STARTUP_INFO', true)
+    const quietStartup = getQuietStartup(params.cwd)
+    const updateNotice = buildUpdateNotice()
 
-    // In pi --mode rpc there typically is no human-readable prelude on stdout.
-    // So we synthesize a similar "startup info" block from local data and emit it.
-    const preludeText = showStartupInfo ? buildStartupInfo({ cwd: params.cwd, fileCommands }) : ''
+    // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
+    // the "New version available" notice (if any) since it's high-signal and actionable.
+    const preludeText = quietStartup ? (updateNotice ? updateNotice + '\n' : '') : buildStartupInfo({
+      cwd: params.cwd,
+      fileCommands,
+      updateNotice
+    })
+
     if (preludeText) session.setStartupInfo(preludeText)
 
     const response = {
@@ -227,7 +225,7 @@ export class PiAcpAgent implements ACPAgent {
 
     // Try to send it immediately after session/new returns; if the client ignores it,
     // it will still be emitted as the first chunk of the first prompt.
-    if (showStartupInfo) setTimeout(() => session.sendStartupInfoIfPending(), 0)
+    if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
     // Advertise slash commands (ACP: available_commands_update)
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
@@ -1092,16 +1090,45 @@ function compareSemver(a: string, b: string): number {
   return 0
 }
 
-function buildStartupInfo(opts: { cwd: string; fileCommands: ReturnType<typeof loadSlashCommands> }): string {
+function buildUpdateNotice(): string | null {
+  // Best-effort update check against npm registry.
+  // Important: keep it fast to not slow down session/new.
+  try {
+    const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
+    const installed = String(piVersion.stdout ?? '')
+      .trim()
+      .replace(/^v/i, '')
+
+    if (!installed || !isSemver(installed)) return null
+
+    const latestRes = spawnSync('npm', ['view', '@mariozechner/pi-coding-agent', 'version'], {
+      encoding: 'utf-8',
+      timeout: 800
+    })
+    const latest = String(latestRes.stdout ?? '')
+      .trim()
+      .replace(/^v/i, '')
+
+    if (!latest || !isSemver(latest)) return null
+    if (compareSemver(latest, installed) <= 0) return null
+
+    return `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @mariozechner/pi-coding-agent\``
+  } catch {
+    return null
+  }
+}
+
+function buildStartupInfo(opts: {
+  cwd: string
+  fileCommands: ReturnType<typeof loadSlashCommands>
+  updateNotice: string | null
+}): string {
   void opts.fileCommands
 
   const md: string[] = []
 
-  let updateNotice: string | null = null
-
-  // pi version header + update notice (best-effort, matches what users see in terminal startup)
+  // pi version header
   try {
-    // No timeout here; in some environments process startup can be slow and we'd rather show the version.
     const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
     const installed = String(piVersion.stdout ?? '')
       .trim()
@@ -1110,24 +1137,6 @@ function buildStartupInfo(opts: { cwd: string; fileCommands: ReturnType<typeof l
       md.push(`pi v${installed}`)
       md.push('---')
       md.push('')
-
-      // Best-effort update check against npm registry.
-      // Important: keep it fast to not slow down session/new.
-      try {
-        const latestRes = spawnSync('npm', ['view', '@mariozechner/pi-coding-agent', 'version'], {
-          encoding: 'utf-8',
-          timeout: 800
-        })
-        const latest = String(latestRes.stdout ?? '')
-          .trim()
-          .replace(/^v/i, '')
-
-        if (latest && isSemver(latest) && isSemver(installed) && compareSemver(latest, installed) > 0) {
-          updateNotice = `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @mariozechner/pi-coding-agent\``
-        }
-      } catch {
-        // ignore
-      }
     }
   } catch {
     // ignore
@@ -1255,9 +1264,9 @@ function buildStartupInfo(opts: { cwd: string; fileCommands: ReturnType<typeof l
 
   addSection('Extensions', extItems)
 
-  if (updateNotice) {
+  if (opts.updateNotice) {
     md.push('---')
-    md.push(updateNotice)
+    md.push(opts.updateNotice)
     md.push('')
   }
 
