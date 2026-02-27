@@ -2,11 +2,13 @@
 
 ACP ([Agent Client Protocol](https://agentclientprotocol.com/overview/introduction)) adapter for [`pi`](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) coding agent (fka shitty coding agent).
 
-`pi-acp` communicates **ACP JSON-RPC 2.0 over stdio** to an ACP client (e.g. an editor) and spawns `pi --mode rpc`, bridging requests/events between the two.
+`pi-acp` communicates **ACP JSON-RPC 2.0 over stdio** to an ACP client (e.g. Zed editor) and spawns `pi --mode rpc`, bridging requests/events between the two.
 
 ## Status
 
 This is an MVP-style adapter intended to be useful today and easy to iterate on. Some ACP features may be not implemented or are not supported (see [Limitations](#limitations)). Development is centered around [Zed](https://zed.dev) editor support, other clients may have varying levels of compatibility.
+
+Expect some minor breaking changes.
 
 ## Features
 
@@ -21,7 +23,7 @@ This is an MVP-style adapter intended to be useful today and easy to iterate on.
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
-- (Zed) `pi-acp` emits a short markdown “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
+- (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
 ## Prerequisites
@@ -40,9 +42,21 @@ npm install -g @mariozechner/pi-coding-agent
 
 ### Add pi-acp to your ACP client, e.g. [Zed](https://zed.dev/docs/agents/external-agents/)
 
-Add the following to your Zed `settngs.json`:
+#### Using ACP Registry in Zed or other clients that support it:
+
+In Zed launch the registry with `zed: acp registry` command and select `pi ACP` adapter from the list. This will automatically add the agent server configuration to your `settings.json` and keep it up to date:
+
+```json
+  "agent_servers": {
+    "pi-acp": {
+      "type": "registry",
+    },
+  }
+```
 
 #### Using with `npx` (no global install needed, always loads the latest version):
+
+Add the following to your Zed `settings.json`:
 
 ```json
   "agent_servers": {
@@ -96,14 +110,12 @@ Point your ACP client to the built `dist/index.js`:
 
 `pi-acp` supports slash commands:
 
-#### 1) File-based commands (compatible with pi)
+#### 1) File-based commands (aka prompts)
 
 Loaded from:
 
-- User commands: `~/.pi/agent/commands/**/*.md`
-- Project commands: `<cwd>/.pi/commands/**/*.md`
-
-These are expanded adapter-side (pi RPC mode doesn’t expand them).
+- User commands: `~/.pi/agent/prompts/**/*.md`
+- Project commands: `<cwd>/.pi/prompts/**/*.md`
 
 #### 2) Built-in commands
 
