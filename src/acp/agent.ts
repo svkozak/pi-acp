@@ -766,6 +766,11 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
 
+    // If the client is re-loading a session that is already active, tear down the existing
+    // pi subprocess so we can start fresh and re-advertise commands reliably.
+    // (Some clients may call session/load when restoring from history.)
+    this.sessions.close(params.sessionId)
+
     this.lastSessionCwd = params.cwd
 
     // MVP: ignore mcpServers.

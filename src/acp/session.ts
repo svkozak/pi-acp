@@ -46,6 +46,21 @@ export class SessionManager {
     return this.sessions.get(sessionId)
   }
 
+  /**
+   * Dispose a session's underlying pi process and remove it from the manager.
+   * Used when clients explicitly reload a session and we want a fresh pi subprocess.
+   */
+  close(sessionId: string): void {
+    const s = this.sessions.get(sessionId)
+    if (!s) return
+    try {
+      s.proc.dispose?.()
+    } catch {
+      // ignore
+    }
+    this.sessions.delete(sessionId)
+  }
+
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
