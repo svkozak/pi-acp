@@ -1,12 +1,15 @@
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from './acp/agent.js'
-import { platform } from 'node:os'
+import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'
 // Terminal Auth entrypoint. The ACP client launches the agent with `--terminal-login`.
 if (process.argv.includes('--terminal-login')) {
   const { spawnSync } = await import('node:child_process')
-  const isWindows = platform() === 'win32'
-  const cmd = process.env.PI_ACP_PI_COMMAND ?? (isWindows ? 'pi.cmd' : 'pi')
-  const res = spawnSync(cmd, [], { stdio: 'inherit', env: process.env })
+  const cmd = getPiCommand(process.env.PI_ACP_PI_COMMAND)
+  const res = spawnSync(cmd, [], {
+    stdio: 'inherit',
+    env: process.env,
+    shell: shouldUseShellForPiCommand(cmd)
+  })
 
   if ((res as any).error && (res as any).error.code === 'ENOENT') {
     process.stderr.write(
