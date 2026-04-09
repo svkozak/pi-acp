@@ -177,6 +177,14 @@ pi-acp --terminal-login
 
 Your ACP client can also invoke this automatically based on the agent's advertised `authMethods`.
 
+### Google Vertex AI
+
+If you use Vertex AI as the inference provider, follow the instructions in the official [Pi documentation](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/providers.md). This only provides access to Google's own Gemini models. If you need access to Anthropic and other providers' models install the `@ssweens/pi-vertex` extension using the pi-cli.
+
+```bash
+pi install npm:@ssweens/pi-vertex
+```
+
 ## Development
 
 ```bash
