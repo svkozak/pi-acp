@@ -69,7 +69,11 @@ export function hasAnyPiAuthConfigured(): boolean {
     'GITHUB_TOKEN',
     // Anthropic oauth
     'ANTHROPIC_OAUTH_TOKEN',
-    'ANTHROPIC_API_KEY'
+    'ANTHROPIC_API_KEY',
+    // Google Vertex AI support using `gloud auth application-default login` or a credentials file
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GOOGLE_CLOUD_PROJECT',
+    'GOOGLE_CLOUD_LOCATION'
   ]
 
   for (const k of envVars) {
