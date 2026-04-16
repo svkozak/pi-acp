@@ -679,10 +679,12 @@ function toToolKind(toolName: string): ToolKind {
     case 'edit':
       return 'edit'
     case 'bash':
-      // Many ACP clients render `execute` tool calls only via the terminal APIs.
-      // Since this adapter lets pi execute locally (no client terminal delegation),
-      // we report bash as `other` so clients show inline text output blocks.
-      return 'other'
+      // Report bash as `execute` so ACP clients (e.g. Zed) render it as a
+      // terminal card that is expanded by default (controlled by the client's
+      // `expand_terminal_card` setting).  pi executes commands locally — no
+      // client terminal delegation is used — but Zed still renders the text
+      // content blocks correctly inside an execute-kind card.
+      return 'execute'
     default:
       return 'other'
   }
