@@ -138,7 +138,7 @@ export class PiAcpAgent implements ACPAgent {
         promptCapabilities: {
           image: true,
           audio: false,
-          embeddedContext: false
+          embeddedContext: process.env.PI_ACP_ENABLE_EMBEDDED_CONTEXT === 'true'
         },
         sessionCapabilities: {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
@@ -1040,13 +1040,15 @@ async function getThinkingState(
   // Ask pi for current thinking level.
   let current: ThinkingLevel = 'medium'
 
-  const state = pre?.state ?? (await (async () => {
-    try {
-      return (await proc.getState()) as any
-    } catch {
-      return null
-    }
-  })())
+  const state =
+    pre?.state ??
+    (await (async () => {
+      try {
+        return (await proc.getState()) as any
+      } catch {
+        return null
+      }
+    })())
 
   const tl = typeof state?.thinkingLevel === 'string' ? state.thinkingLevel : null
   if (tl && isThinkingLevel(tl)) current = tl
@@ -1073,13 +1075,15 @@ async function getModelState(
   // Ask pi for available models.
   let availableModels: ModelInfo[] = []
 
-  const data = pre?.availableModels ?? (await (async () => {
-    try {
-      return (await proc.getAvailableModels()) as any
-    } catch {
-      return null
-    }
-  })())
+  const data =
+    pre?.availableModels ??
+    (await (async () => {
+      try {
+        return (await proc.getAvailableModels()) as any
+      } catch {
+        return null
+      }
+    })())
 
   const models: any[] = Array.isArray(data?.models) ? data.models : []
   availableModels = models
@@ -1100,13 +1104,15 @@ async function getModelState(
   // Ask pi what model is currently active.
   let currentModelId: string | null = null
 
-  const state = pre?.state ?? (await (async () => {
-    try {
-      return (await proc.getState()) as any
-    } catch {
-      return null
-    }
-  })())
+  const state =
+    pre?.state ??
+    (await (async () => {
+      try {
+        return (await proc.getState()) as any
+      } catch {
+        return null
+      }
+    })())
 
   const model = state?.model
   if (model && typeof model === 'object') {
@@ -1154,8 +1160,10 @@ function buildUpdateNotice(): string | null {
   // Important: keep it fast to not slow down session/new.
   try {
     const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
-    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim())
-      .replace(/^v/i, '')
+    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
+      /^v/i,
+      ''
+    )
 
     if (!installed || !isSemver(installed)) return null
 
@@ -1188,8 +1196,10 @@ function buildStartupInfo(opts: {
   // pi version header
   try {
     const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
-    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim())
-      .replace(/^v/i, '')
+    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
+      /^v/i,
+      ''
+    )
     if (installed) {
       md.push(`pi v${installed}`)
       md.push('---')
