@@ -15,6 +15,14 @@ import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/proces
 import { SessionStore } from './session-store.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
+import {
+  addUsage,
+  emptyUsage,
+  formatUsageStatus,
+  parsePiUsage,
+  type PiUsage,
+  type UsageSnapshot
+} from './translate/usage.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -22,6 +30,10 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
+  /** Initial model context window, used to compute the context-fill %. */
+  contextWindow?: number | null
+  /** Initial model id (provider/model), used for the status line. */
+  modelId?: string | null
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -60,6 +72,28 @@ function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCal
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
+}
+
+// Tools whose stdout we want the client to render in a fixed-width block. Pi's
+// `bash` tool emits raw shell output that otherwise gets re-flowed by the
+// markdown renderer in Zed / other clients.
+const FENCED_OUTPUT_TOOLS = new Set(['bash'])
+
+function fenceBashOutput(text: string): string {
+  if (!text) return text
+  // Use the longest run of backticks in `text` + 1 as the fence length so we
+  // never terminate early on output that itself contains ``` sequences.
+  const longestRun = (text.match(/`+/g) ?? []).reduce((n, s) => Math.max(n, s.length), 0)
+  const fence = '`'.repeat(Math.max(3, longestRun + 1))
+  return `${fence}shell\n${text.replace(/\n$/, '')}\n${fence}`
+}
+
+function formatToolOutputContent(toolName: string, text: string): ToolCallContent[] | undefined {
+  if (!text) return undefined
+  if (FENCED_OUTPUT_TOOLS.has(toolName)) {
+    return [{ type: 'content', content: { type: 'text', text: fenceBashOutput(text) } }]
+  }
+  return [{ type: 'content', content: { type: 'text', text } }]
 }
 
 export class SessionManager {
@@ -135,7 +169,9 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      contextWindow: params.contextWindow ?? null,
+      modelId: params.modelId ?? null
     })
 
     this.sessions.set(sessionId, session)
@@ -162,7 +198,9 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      contextWindow: params.contextWindow ?? null,
+      modelId: params.modelId ?? null
     })
 
     this.sessions.set(sessionId, session)
@@ -192,20 +230,35 @@ export class PiAcpSession {
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
-  private currentToolCalls = new Map<string, 'pending' | 'in_progress'>()
+  //
+  // Keeps `toolName` alongside the status so subsequent `tool_execution_update`
+  // / `tool_execution_end` events (which only carry the toolCallId) can still
+  // drive per-tool output formatting (e.g. fenced bash output, structured
+  // diffs).
+  private currentToolCalls = new Map<string, { status: 'pending' | 'in_progress'; toolName: string }>()
 
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   private inAgentLoop = false
 
-  // For ACP diff support: capture file contents before edits, then emit ToolCallContent {type:"diff"}.
-  // This is due to pi sending diff as a string as opposed to ACP expected diff format.
-  // Compatible format may need to be implemented in pi in the future.
-  private editSnapshots = new Map<string, { path: string; oldText: string }>()
+  // For ACP diff support: capture file contents before `edit` / `write`, then
+  // emit ToolCallContent {type:"diff"} on completion. This is done because pi
+  // sends its diff as a pre-formatted string rather than the structured shape
+  // ACP expects. A compatible native format may land in pi in the future.
+  //
+  // For `write` against a new file we record oldText = '' so the client can
+  // still render the creation as a diff against an empty file.
+  private fileSnapshots = new Map<string, { path: string; oldText: string; toolName: 'edit' | 'write' }>()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
+
+  // Usage telemetry. Populated from pi `message_end` events on assistant messages.
+  private sessionUsage: PiUsage = emptyUsage()
+  private lastAssistantUsage: PiUsage | null = null
+  private currentModelId: string | null
+  private contextWindow: number | null
 
   constructor(opts: {
     sessionId: string
@@ -214,6 +267,8 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    contextWindow?: number | null
+    modelId?: string | null
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -221,8 +276,49 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.contextWindow = opts.contextWindow ?? null
+    this.currentModelId = opts.modelId ?? null
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
+  }
+
+  /** Called by the agent layer when a client sets a new model via `unstable_setSessionModel`. */
+  setCurrentModel(modelId: string | null, contextWindow: number | null): void {
+    this.currentModelId = modelId
+    if (contextWindow !== null) this.contextWindow = contextWindow
+  }
+
+  /** Snapshot of cumulative session usage, for attaching to a PromptResponse. */
+  getCumulativeUsage() {
+    return {
+      inputTokens: this.sessionUsage.input,
+      outputTokens: this.sessionUsage.output,
+      totalTokens: this.sessionUsage.totalTokens,
+      cachedReadTokens: this.sessionUsage.cacheRead,
+      cachedWriteTokens: this.sessionUsage.cacheWrite
+    }
+  }
+
+  private snapshotUsage(): UsageSnapshot {
+    const last = this.lastAssistantUsage
+    const lastPromptTokens = last ? last.input + last.cacheRead + last.cacheWrite : 0
+    const fill =
+      last && this.contextWindow && this.contextWindow > 0
+        ? Math.min(1, lastPromptTokens / this.contextWindow)
+        : null
+
+    return {
+      lastTurnTokens: last?.totalTokens ?? 0,
+      lastTurnCost: last?.cost.total ?? 0,
+      sessionInputTokens: this.sessionUsage.input,
+      sessionOutputTokens: this.sessionUsage.output,
+      sessionCacheReadTokens: this.sessionUsage.cacheRead,
+      sessionCacheWriteTokens: this.sessionUsage.cacheWrite,
+      sessionTotalTokens: this.sessionUsage.totalTokens,
+      sessionCost: this.sessionUsage.cost.total,
+      contextWindow: this.contextWindow,
+      contextFillRatio: fill
+    }
   }
 
   setStartupInfo(text: string) {
@@ -421,12 +517,12 @@ export class PiAcpSession {
                   })()
 
             const locations = toToolCallLocations(rawInput, this.cwd)
-            const existingStatus = this.currentToolCalls.get(toolCallId)
+            const existing = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
-            const status = existingStatus ?? 'pending'
+            const status = existing?.status ?? 'pending'
 
-            if (!existingStatus) {
-              this.currentToolCalls.set(toolCallId, 'pending')
+            if (!existing) {
+              this.currentToolCalls.set(toolCallId, { status: 'pending', toolName })
               this.emit({
                 sessionUpdate: 'tool_call',
                 toolCallId,
@@ -463,18 +559,28 @@ export class PiAcpSession {
         let line: number | undefined
 
         // Capture pre-edit file contents so we can emit a structured ACP diff on completion.
-        if (toolName === 'edit') {
+        // `edit`: snapshot must already exist. `write`: new file is allowed, oldText = ''.
+        if (toolName === 'edit' || toolName === 'write') {
           const p = typeof args?.path === 'string' ? args.path : undefined
           if (p) {
+            const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
+            let oldText: string | null = null
             try {
-              const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
-              const oldText = readFileSync(abs, 'utf8')
-              this.editSnapshots.set(toolCallId, { path: p, oldText })
-
-              const needle = typeof args?.oldText === 'string' ? args.oldText : ''
-              line = findUniqueLineNumber(oldText, needle)
+              oldText = readFileSync(abs, 'utf8')
             } catch {
-              // Ignore snapshot failures; we'll fall back to plain text output.
+              // For `write`, treat a missing file as an empty pre-state so the client
+              // still renders the creation as a diff. For `edit`, we skip diffing
+              // if we can't snapshot.
+              if (toolName === 'write') oldText = ''
+            }
+
+            if (oldText !== null) {
+              this.fileSnapshots.set(toolCallId, { path: p, oldText, toolName })
+
+              if (toolName === 'edit') {
+                const needle = typeof args?.oldText === 'string' ? args.oldText : ''
+                line = findUniqueLineNumber(oldText, needle)
+              }
             }
           }
         }
@@ -483,7 +589,7 @@ export class PiAcpSession {
 
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
-          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.currentToolCalls.set(toolCallId, { status: 'in_progress', toolName })
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
@@ -494,7 +600,7 @@ export class PiAcpSession {
             rawInput: args
           })
         } else {
-          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.currentToolCalls.set(toolCallId, { status: 'in_progress', toolName })
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
@@ -513,14 +619,13 @@ export class PiAcpSession {
 
         const partial = (ev as any).partialResult
         const text = toolResultToText(partial)
+        const toolName = this.currentToolCalls.get(toolCallId)?.toolName ?? ''
 
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: 'in_progress',
-          content: text
-            ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
-            : undefined,
+          content: formatToolOutputContent(toolName, text),
           rawOutput: partial
         })
         break
@@ -533,10 +638,11 @@ export class PiAcpSession {
         const result = (ev as any).result
         const isError = Boolean((ev as any).isError)
         const text = toolResultToText(result)
+        const toolName = this.currentToolCalls.get(toolCallId)?.toolName ?? ''
 
-        // If this was an edit and we captured a snapshot, emit a structured ACP diff.
+        // If this was an edit/write and we captured a snapshot, emit a structured ACP diff.
         // This enables clients like Zed to render an actual diff UI.
-        const snapshot = this.editSnapshots.get(toolCallId)
+        const snapshot = this.fileSnapshots.get(toolCallId)
         let content: ToolCallContent[] | undefined
 
         if (!isError && snapshot) {
@@ -544,6 +650,7 @@ export class PiAcpSession {
             const abs = isAbsolute(snapshot.path) ? snapshot.path : resolvePath(this.cwd, snapshot.path)
             const newText = readFileSync(abs, 'utf8')
             if (newText !== snapshot.oldText) {
+              const followupText = formatToolOutputContent(toolName, text) ?? []
               content = [
                 {
                   type: 'diff',
@@ -551,7 +658,7 @@ export class PiAcpSession {
                   oldText: snapshot.oldText,
                   newText
                 },
-                ...(text ? ([{ type: 'content', content: { type: 'text', text } }] as ToolCallContent[]) : [])
+                ...followupText
               ]
             }
           } catch {
@@ -559,9 +666,9 @@ export class PiAcpSession {
           }
         }
 
-        // Fallback: just text content.
-        if (!content && text) {
-          content = [{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[]
+        // Fallback: just text content (fenced for bash so clients render a code block).
+        if (!content) {
+          content = formatToolOutputContent(toolName, text)
         }
 
         this.emit({
@@ -573,7 +680,7 @@ export class PiAcpSession {
         })
 
         this.currentToolCalls.delete(toolCallId)
-        this.editSnapshots.delete(toolCallId)
+        this.fileSnapshots.delete(toolCallId)
         break
       }
 
@@ -617,6 +724,21 @@ export class PiAcpSession {
         break
       }
 
+      case 'message_end': {
+        // Pi emits message_end for every role (user, assistant, toolResult).
+        // Only assistant messages carry `usage`. Each agent loop may emit several
+        // of these (one per model call), so we accumulate.
+        const message = (ev as any).message
+        if (message?.role === 'assistant') {
+          const usage = parsePiUsage(message.usage)
+          if (usage) {
+            this.lastAssistantUsage = usage
+            this.sessionUsage = addUsage(this.sessionUsage, usage)
+          }
+        }
+        break
+      }
+
       case 'turn_end': {
         // pi uses `turn_end` for sub-steps (e.g. tool_use) and will often start another turn.
         // Do NOT resolve the ACP `session/prompt` here; wait for `agent_end`.
@@ -624,6 +746,59 @@ export class PiAcpSession {
       }
 
       case 'agent_end': {
+        // Before resolving the prompt turn, emit usage telemetry in three forms so any
+        // client can show something useful:
+        //
+        //   1. `usage_update` (ACP ≥0.14, gated behind Zed's AcpBetaFeatureFlag) — drives
+        //      the circular context-window ring and cost chip in Zed. `used`/`size` are
+        //      based on the last assistant prompt (input + cacheRead + cacheWrite) vs the
+        //      model's contextWindow.
+        //   2. `session_info_update` with `_meta.piAcp.usage` — structured data other
+        //      clients / tools can read even without the beta flag.
+        //   3. An inline `agent_message_chunk` status line — visible in any client. Can
+        //      be suppressed by `PI_ACP_HIDE_USAGE_STATUS=1`.
+        const snap = this.snapshotUsage()
+        const lastPromptTokens = this.lastAssistantUsage
+          ? this.lastAssistantUsage.input +
+            this.lastAssistantUsage.cacheRead +
+            this.lastAssistantUsage.cacheWrite
+          : 0
+
+        if (this.contextWindow && this.contextWindow > 0) {
+          this.emit({
+            sessionUpdate: 'usage_update',
+            used: Math.min(lastPromptTokens, this.contextWindow),
+            size: this.contextWindow,
+            cost:
+              snap.sessionCost > 0
+                ? { amount: snap.sessionCost, currency: 'USD' }
+                : null
+          })
+        }
+
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          updatedAt: new Date().toISOString(),
+          _meta: {
+            piAcp: {
+              usage: snap,
+              model: this.currentModelId,
+              queueDepth: this.turnQueue.length,
+              running: false
+            }
+          }
+        })
+
+        if (process.env.PI_ACP_HIDE_USAGE_STATUS !== '1' && snap.sessionTotalTokens > 0) {
+          const text = formatUsageStatus(snap, { includeSessionTotal: true })
+          if (text) {
+            this.emit({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `\n_${text}_\n` }
+            })
+          }
+        }
+
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void this.flushEmits().finally(() => {
