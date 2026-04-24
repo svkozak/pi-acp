@@ -122,15 +122,33 @@ export class PiAcpAgent implements ACPAgent {
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
 
+  /**
+   * Whether the connected ACP client renders `usage_update` natively (context ring / cost chip)
+   * and therefore does NOT need the inline text-status fallback. Decided during `initialize`
+   * from `clientInfo.name`. Defaults to `false` so unknown clients still get the text line.
+   */
+  private clientRendersUsageNatively = false
+
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
   }
 
+  /**
+   * ACP doesn't (yet) expose a `usage_update` capability flag in `ClientCapabilities`, so we use
+   * `clientInfo.name` as a proxy. Keep this list conservative — false negatives just mean the
+   * text status line is shown (harmless), but false positives would hide the info entirely.
+   */
+  private static readonly NATIVE_USAGE_CLIENTS: ReadonlySet<string> = new Set(['zed'])
+
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
     const requested = params.protocolVersion
+
+    const clientName = (params as any)?.clientInfo?.name
+    this.clientRendersUsageNatively =
+      typeof clientName === 'string' && PiAcpAgent.NATIVE_USAGE_CLIENTS.has(clientName.toLowerCase())
 
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
@@ -187,7 +205,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      clientRendersUsageNatively: this.clientRendersUsageNatively
     })
 
     // NOTE: we re-fetch state + models below; the session was constructed without
@@ -919,7 +938,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       proc,
-      fileCommands
+      fileCommands,
+      clientRendersUsageNatively: this.clientRendersUsageNatively
     })
 
     // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.

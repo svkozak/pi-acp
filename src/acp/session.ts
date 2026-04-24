@@ -34,6 +34,13 @@ type SessionCreateParams = {
   contextWindow?: number | null
   /** Initial model id (provider/model), used for the status line. */
   modelId?: string | null
+  /**
+   * Whether the ACP client is known to render `usage_update` natively (e.g. as a context ring
+   * and/or cost chip). When `true`, the inline `agent_message_chunk` status-line fallback is
+   * suppressed to avoid duplicating information already shown in the client UI. Decided by the
+   * agent at `initialize` time from `clientInfo.name`.
+   */
+  clientRendersUsageNatively?: boolean
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -171,7 +178,8 @@ export class SessionManager {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       contextWindow: params.contextWindow ?? null,
-      modelId: params.modelId ?? null
+      modelId: params.modelId ?? null,
+      clientRendersUsageNatively: params.clientRendersUsageNatively ?? false
     })
 
     this.sessions.set(sessionId, session)
@@ -200,7 +208,8 @@ export class SessionManager {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       contextWindow: params.contextWindow ?? null,
-      modelId: params.modelId ?? null
+      modelId: params.modelId ?? null,
+      clientRendersUsageNatively: params.clientRendersUsageNatively ?? false
     })
 
     this.sessions.set(sessionId, session)
@@ -259,6 +268,7 @@ export class PiAcpSession {
   private lastAssistantUsage: PiUsage | null = null
   private currentModelId: string | null
   private contextWindow: number | null
+  private readonly clientRendersUsageNatively: boolean
 
   constructor(opts: {
     sessionId: string
@@ -269,6 +279,7 @@ export class PiAcpSession {
     fileCommands?: FileSlashCommand[]
     contextWindow?: number | null
     modelId?: string | null
+    clientRendersUsageNatively?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -278,6 +289,7 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
     this.contextWindow = opts.contextWindow ?? null
     this.currentModelId = opts.modelId ?? null
+    this.clientRendersUsageNatively = opts.clientRendersUsageNatively ?? false
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -297,6 +309,23 @@ export class PiAcpSession {
       cachedReadTokens: this.sessionUsage.cacheRead,
       cachedWriteTokens: this.sessionUsage.cacheWrite
     }
+  }
+
+  /**
+   * Decide whether to emit the inline status-line `agent_message_chunk` fallback.
+   *
+   * Order of precedence:
+   *   1. `PI_ACP_USAGE_STATUS=never`     → false
+   *   2. `PI_ACP_HIDE_USAGE_STATUS=1`    → false (legacy alias)
+   *   3. `PI_ACP_USAGE_STATUS=always`    → true
+   *   4. `PI_ACP_USAGE_STATUS=auto` (or unset) → !clientRendersUsageNatively
+   */
+  private shouldEmitUsageStatusText(): boolean {
+    const mode = (process.env.PI_ACP_USAGE_STATUS ?? '').toLowerCase()
+    if (mode === 'never') return false
+    if (process.env.PI_ACP_HIDE_USAGE_STATUS === '1') return false
+    if (mode === 'always') return true
+    return !this.clientRendersUsageNatively
   }
 
   private snapshotUsage(): UsageSnapshot {
@@ -755,8 +784,12 @@ export class PiAcpSession {
         //      model's contextWindow.
         //   2. `session_info_update` with `_meta.piAcp.usage` — structured data other
         //      clients / tools can read even without the beta flag.
-        //   3. An inline `agent_message_chunk` status line — visible in any client. Can
-        //      be suppressed by `PI_ACP_HIDE_USAGE_STATUS=1`.
+        //   3. An inline `agent_message_chunk` status line — visible in any client that only
+        //      renders text. Suppressed automatically when the ACP client is known to render
+        //      `usage_update` natively (e.g. Zed's context ring) to avoid duplicate display.
+        //      Precedence for the gating decision:
+        //        PI_ACP_USAGE_STATUS = 'never' | 'always' | 'auto' (default)
+        //        legacy: PI_ACP_HIDE_USAGE_STATUS=1 → equivalent to 'never'
         const snap = this.snapshotUsage()
         const lastPromptTokens = this.lastAssistantUsage
           ? this.lastAssistantUsage.input +
@@ -789,7 +822,7 @@ export class PiAcpSession {
           }
         })
 
-        if (process.env.PI_ACP_HIDE_USAGE_STATUS !== '1' && snap.sessionTotalTokens > 0) {
+        if (this.shouldEmitUsageStatusText() && snap.sessionTotalTokens > 0) {
           const text = formatUsageStatus(snap, { includeSessionTotal: true })
           if (text) {
             this.emit({

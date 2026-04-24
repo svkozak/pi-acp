@@ -98,6 +98,117 @@ test('PiAcpSession: emits usage snapshot + status line on agent_end', async () =
   }
 })
 
+test('PiAcpSession: suppresses status chunk when clientRendersUsageNatively=true (but keeps usage_update + meta)', async () => {
+  const prevHide = process.env.PI_ACP_HIDE_USAGE_STATUS
+  const prevMode = process.env.PI_ACP_USAGE_STATUS
+  delete process.env.PI_ACP_HIDE_USAGE_STATUS
+  delete process.env.PI_ACP_USAGE_STATUS
+
+  try {
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+
+    const session = new PiAcpSession({
+      sessionId: 's-native',
+      cwd: '/tmp/project',
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: [],
+      contextWindow: 100_000,
+      modelId: 'anthropic/claude-sonnet-4',
+      clientRendersUsageNatively: true
+    })
+
+    const turn = session.prompt('hi')
+    proc.emit({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        usage: {
+          input: 100,
+          output: 50,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 150,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 }
+        }
+      }
+    })
+    proc.emit({ type: 'agent_end' })
+    assert.equal(await turn, 'end_turn')
+    await setTimeoutFlush()
+
+    // No duplicate text status line.
+    const chunk = findUpdate(
+      conn,
+      u => u?.sessionUpdate === 'agent_message_chunk' && typeof u?.content?.text === 'string' && u.content.text.includes('ctx')
+    )
+    assert.equal(chunk, undefined, 'status chunk should be suppressed when the client renders usage natively')
+
+    // But usage_update (the ring) and _meta usage are still emitted.
+    assert.ok(findUpdate(conn, u => u?.sessionUpdate === 'usage_update'))
+    assert.ok(findUpdate(conn, u => u?.sessionUpdate === 'session_info_update' && u?._meta?.piAcp?.usage))
+  } finally {
+    if (prevHide === undefined) delete process.env.PI_ACP_HIDE_USAGE_STATUS
+    else process.env.PI_ACP_HIDE_USAGE_STATUS = prevHide
+    if (prevMode === undefined) delete process.env.PI_ACP_USAGE_STATUS
+    else process.env.PI_ACP_USAGE_STATUS = prevMode
+  }
+})
+
+test('PiAcpSession: PI_ACP_USAGE_STATUS=always forces the text line even for native-usage clients', async () => {
+  const prevMode = process.env.PI_ACP_USAGE_STATUS
+  process.env.PI_ACP_USAGE_STATUS = 'always'
+
+  try {
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+
+    const session = new PiAcpSession({
+      sessionId: 's-force',
+      cwd: '/tmp/project',
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: [],
+      contextWindow: 100_000,
+      modelId: 'anthropic/claude-sonnet-4',
+      clientRendersUsageNatively: true
+    })
+
+    const turn = session.prompt('hi')
+    proc.emit({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        usage: {
+          input: 100,
+          output: 50,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 150,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 }
+        }
+      }
+    })
+    proc.emit({ type: 'agent_end' })
+    assert.equal(await turn, 'end_turn')
+    await setTimeoutFlush()
+
+    const chunk = findUpdate(
+      conn,
+      u => u?.sessionUpdate === 'agent_message_chunk' && typeof u?.content?.text === 'string' && u.content.text.includes('ctx')
+    )
+    assert.ok(chunk, 'status chunk should be emitted when PI_ACP_USAGE_STATUS=always')
+  } finally {
+    if (prevMode === undefined) delete process.env.PI_ACP_USAGE_STATUS
+    else process.env.PI_ACP_USAGE_STATUS = prevMode
+  }
+})
+
 test('PiAcpSession: PI_ACP_HIDE_USAGE_STATUS=1 suppresses the status chunk but keeps the meta', async () => {
   process.env.PI_ACP_HIDE_USAGE_STATUS = '1'
 
