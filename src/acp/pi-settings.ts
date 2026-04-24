@@ -58,6 +58,29 @@ export function getEnableSkillCommands(cwd: string): boolean {
 }
 
 /**
+ * Mirror pi settings semantics for extension-sourced slash commands (e.g. /worktree,
+ * /plannotator, /mcp, /jarvis …).
+ *
+ * Resolution order (first wins):
+ *   1. `PI_ACP_ENABLE_EXTENSION_COMMANDS` env var (`true` | `false`)
+ *   2. `enableExtensionCommands` in merged pi settings (global + project)
+ *   3. Default: `true` — matches the behavior of skill commands, so extension-provided
+ *      commands are discoverable in ACP clients by default. Set to `false` to hide them
+ *      (useful if an extension emits UI requests the ACP adapter doesn't handle).
+ */
+export function getEnableExtensionCommands(cwd: string): boolean {
+  const env = process.env.PI_ACP_ENABLE_EXTENSION_COMMANDS
+  if (env === 'true') return true
+  if (env === 'false') return false
+
+  const merged = getMergedSettings(cwd)
+  const direct = merged.enableExtensionCommands
+  if (typeof direct === 'boolean') return direct
+
+  return true
+}
+
+/**
  * Mirror pi's quietStartup setting: if true, pi suppresses the verbose startup prelude.
  * We use it to decide whether to synthesize + emit our own "startup info" message.
  */

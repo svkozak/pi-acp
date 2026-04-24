@@ -46,7 +46,7 @@
     "prepublishOnly": "npm run test && npm run build"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.12.0",
+    "@agentclientprotocol/sdk": "^0.19.1",
     "zod": "^3.25.0"
   },
   "devDependencies": {

@@ -28,7 +28,7 @@ import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi
 import { toolResultToText } from './translate/pi-tools.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
-import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
+import { getAgentDir, getEnableExtensionCommands, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from 'node:fs'
@@ -36,8 +36,16 @@ import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { hasAnyPiAuthConfigured } from '../pi-auth/status.js'
+import { formatVersionBlock, formatVersionLabel, getAgentInfoVersion, getVersionInfo } from '../version.js'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+
+function shortSessionTitle(sessionId: string): string {
+  // pi sessionIds are ULID-ish; show the first 8 chars as a stable placeholder.
+  // Prefixed with the pi-acp build identifier so users can tell at a glance
+  // which adapter build they're talking to (useful for local iteration).
+  return `${formatVersionLabel()} · pi-${sessionId.slice(0, 8)}`
+}
 
 function builtinAvailableCommands(): AvailableCommand[] {
   return [
@@ -77,6 +85,10 @@ function builtinAvailableCommands(): AvailableCommand[] {
     {
       name: 'changelog',
       description: 'Show pi changelog'
+    },
+    {
+      name: 'version',
+      description: 'Show pi-acp version, git sha, and build time'
     }
   ]
 }
@@ -110,22 +122,40 @@ export class PiAcpAgent implements ACPAgent {
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
 
+  /**
+   * Whether the connected ACP client renders `usage_update` natively (context ring / cost chip)
+   * and therefore does NOT need the inline text-status fallback. Decided during `initialize`
+   * from `clientInfo.name`. Defaults to `false` so unknown clients still get the text line.
+   */
+  private clientRendersUsageNatively = false
+
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
   }
+
+  /**
+   * ACP doesn't (yet) expose a `usage_update` capability flag in `ClientCapabilities`, so we use
+   * `clientInfo.name` as a proxy. Keep this list conservative — false negatives just mean the
+   * text status line is shown (harmless), but false positives would hide the info entirely.
+   */
+  private static readonly NATIVE_USAGE_CLIENTS: ReadonlySet<string> = new Set(['zed'])
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
     const requested = params.protocolVersion
 
+    const clientName = (params as any)?.clientInfo?.name
+    this.clientRendersUsageNatively =
+      typeof clientName === 'string' && PiAcpAgent.NATIVE_USAGE_CLIENTS.has(clientName.toLowerCase())
+
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
         name: pkg.name ?? 'pi-acp',
         title: 'pi ACP adapter',
-        version: pkg.version ?? '0.0.0'
+        version: getAgentInfoVersion()
       },
       // Zed currently uses ClientCapabilities._meta["terminal-auth"] to decide whether to show
       // the "Authenticate" banner/button. If not supported, we still return the method for the registry.
@@ -168,6 +198,7 @@ export class PiAcpAgent implements ACPAgent {
 
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
+    const enableExtensionCommands = getEnableExtensionCommands(params.cwd)
 
     // Pi doesn't support mcpServers, but we accept and store.
     const session = await this.sessions.create({
@@ -175,8 +206,12 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      clientRendersUsageNatively: this.clientRendersUsageNatively
     })
+
+    // NOTE: we re-fetch state + models below; the session was constructed without
+    // the current modelId/contextWindow and we'll set them once we know them.
 
     // Fetch state + models once (parallel) to reduce startup latency.
     let state: any = null
@@ -219,6 +254,12 @@ export class PiAcpAgent implements ACPAgent {
     const models = await getModelState(session.proc, { state, availableModels })
     const thinking = await getThinkingState(session.proc, { state })
 
+    // Seed the session with context-window + current model so the usage status line
+    // can compute a context-fill %.
+    const modelContextWindow =
+      typeof (state as any)?.model?.contextWindow === 'number' ? (state as any).model.contextWindow : null
+    session.setCurrentModel(models?.currentModelId ?? null, modelContextWindow)
+
     const quietStartup = getQuietStartup(params.cwd)
     const updateNotice = buildUpdateNotice()
 
@@ -259,16 +300,51 @@ export class PiAcpAgent implements ACPAgent {
     // it will still be emitted as the first chunk of the first prompt.
     if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
-    // Advertise slash commands (ACP: available_commands_update)
+    // Post-response bootstrap: session metadata (title + mode + _meta) then slash commands.
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
-    // So we must send this *after* the session/new response has been delivered.
+    // So we must send these *after* the session/new response has been delivered.
     setTimeout(() => {
       void (async () => {
+        try {
+          const initialTitle = typeof (state as any)?.sessionName === 'string' && (state as any).sessionName.trim()
+            ? (state as any).sessionName.trim()
+            : shortSessionTitle(session.sessionId)
+
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              title: initialTitle,
+              updatedAt: new Date().toISOString(),
+              _meta: {
+                piAcp: {
+                  version: getVersionInfo(),
+                  model: models?.currentModelId ?? null,
+                  contextWindow: modelContextWindow,
+                  sessionFile: typeof (state as any)?.sessionFile === 'string' ? (state as any).sessionFile : null
+                }
+              }
+            }
+          })
+
+          if (thinking?.currentModeId) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'current_mode_update',
+                currentModeId: thinking.currentModeId
+              }
+            })
+          }
+        } catch {
+          // best-effort only
+        }
+
         try {
           const pi = (await session.proc.getCommands()) as any
           const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
-            includeExtensionCommands: false
+            includeExtensionCommands: enableExtensionCommands
           })
 
           await this.conn.sessionUpdate({
@@ -522,6 +598,17 @@ export class PiAcpAgent implements ACPAgent {
         return { stopReason: 'end_turn' }
       }
 
+      if (cmd === 'version') {
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '```\n' + formatVersionBlock() + '\n```' }
+          }
+        })
+        return { stopReason: 'end_turn' }
+      }
+
       if (cmd === 'changelog') {
         // Read pi's installed CHANGELOG.md. Adapter-side, no model call.
         const findChangelog = (): string | null => {
@@ -756,7 +843,22 @@ export class PiAcpAgent implements ACPAgent {
     const stopReason: StopReason =
       result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
 
-    return { stopReason }
+    // Attach cumulative session usage (ACP ≥0.14) so clients that support the
+    // experimental `Usage` field on PromptResponse can render per-message token splits.
+    const usage = session.getCumulativeUsage()
+    return {
+      stopReason,
+      usage:
+        usage.totalTokens > 0
+          ? {
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              totalTokens: usage.totalTokens,
+              cachedReadTokens: usage.cachedReadTokens,
+              cachedWriteTokens: usage.cachedWriteTokens
+            }
+          : undefined
+    }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -831,13 +933,15 @@ export class PiAcpAgent implements ACPAgent {
 
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
+    const enableExtensionCommands = getEnableExtensionCommands(params.cwd)
 
     const session = this.sessions.getOrCreate(params.sessionId, {
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       conn: this.conn,
       proc,
-      fileCommands
+      fileCommands,
+      clientRendersUsageNatively: this.clientRendersUsageNatively
     })
 
     // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
@@ -917,8 +1021,13 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const models = await getModelState(proc)
-    const thinking = await getThinkingState(proc)
+    const loadState = (await proc.getState().catch(() => null)) as any
+    const models = await getModelState(proc, { state: loadState })
+    const thinking = await getThinkingState(proc, { state: loadState })
+
+    const loadedContextWindow =
+      typeof loadState?.model?.contextWindow === 'number' ? loadState.model.contextWindow : null
+    session.setCurrentModel(models?.currentModelId ?? null, loadedContextWindow)
 
     const response = {
       models,
@@ -930,14 +1039,51 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    // Advertise slash commands after the response so the client knows the session exists.
+    // Post-response bootstrap: slash commands + session metadata. All are scheduled
+    // together so tests can assert a single timer deferral and clients see them
+    // in a predictable order after the session/load response lands.
     setTimeout(() => {
       void (async () => {
+        try {
+          const title = typeof loadState?.sessionName === 'string' && loadState.sessionName.trim()
+            ? loadState.sessionName.trim()
+            : shortSessionTitle(session.sessionId)
+
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              title,
+              updatedAt: new Date().toISOString(),
+              _meta: {
+                piAcp: {
+                  version: getVersionInfo(),
+                  model: models?.currentModelId ?? null,
+                  contextWindow: loadedContextWindow,
+                  sessionFile: typeof loadState?.sessionFile === 'string' ? loadState.sessionFile : sessionFile
+                }
+              }
+            }
+          })
+
+          if (thinking?.currentModeId) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'current_mode_update',
+                currentModeId: thinking.currentModeId
+              }
+            })
+          }
+        } catch {
+          // best-effort
+        }
+
         try {
           const pi = (await proc.getCommands()) as any
           const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
-            includeExtensionCommands: false
+            includeExtensionCommands: enableExtensionCommands
           })
 
           await this.conn.sessionUpdate({
@@ -997,6 +1143,15 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     await session.proc.setModel(provider, modelId)
+
+    // Refresh our cached context window + model id so the usage line stays accurate.
+    try {
+      const fresh = (await session.proc.getState()) as any
+      const cw = typeof fresh?.model?.contextWindow === 'number' ? fresh.model.contextWindow : null
+      session.setCurrentModel(`${provider}/${modelId}`, cw)
+    } catch {
+      session.setCurrentModel(`${provider}/${modelId}`, null)
+    }
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1193,21 +1348,24 @@ function buildStartupInfo(opts: {
 
   const md: string[] = []
 
-  // pi version header
+  // pi-acp + pi header. Users running a local build get the git sha and a
+  // (dev) marker here so they can distinguish their working tree from the
+  // npm-published build.
+  md.push(formatVersionLabel())
+
   try {
     const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
     const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
       /^v/i,
       ''
     )
-    if (installed) {
-      md.push(`pi v${installed}`)
-      md.push('---')
-      md.push('')
-    }
+    if (installed) md.push(`pi v${installed}`)
   } catch {
     // ignore
   }
+
+  md.push('---')
+  md.push('')
 
   const addSection = (title: string, items: string[]) => {
     const cleaned = items.map(s => s.trim()).filter(Boolean)
