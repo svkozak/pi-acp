@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+import { getForwardedPiArgs } from './forward-args.js'
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -131,6 +132,7 @@ export class PiRpcProcess {
     // (e.g. MCP extensions, prompt templates for workflows).
     const args = ['--mode', 'rpc', '--no-themes']
     if (params.sessionPath) args.push('--session', params.sessionPath)
+    args.push(...getForwardedPiArgs())
 
     const child = spawn(cmd, args, {
       cwd: params.cwd,
