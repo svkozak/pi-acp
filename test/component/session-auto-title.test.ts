@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
-function makeSession(opts: { titleProc?: FakePiRpcProcess; autoTitleEnabled?: boolean } = {}) {
+function makeSession(opts: { titleProc?: FakePiRpcProcess; autoTitleEnabled?: boolean; hasExistingTitle?: boolean; titleTimeoutMs?: number } = {}) {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
   const titleProc = opts.titleProc ?? new FakePiRpcProcess()
@@ -20,6 +20,8 @@ function makeSession(opts: { titleProc?: FakePiRpcProcess; autoTitleEnabled?: bo
     conn: asAgentConn(conn),
     fileCommands: [],
     autoTitleEnabled: opts.autoTitleEnabled,
+    hasExistingTitle: opts.hasExistingTitle,
+    titleTimeoutMs: opts.titleTimeoutMs,
     titleProcessFactory: async () => titleProc as any
   })
 
@@ -94,4 +96,36 @@ test('PiAcpSession: falls back to prompt-derived title when worker fails', async
   await new Promise(r => setTimeout(r, 0))
 
   assert.deepEqual(proc.setSessionNameCalls, ['Please fix the login redirect loop in auth'])
+})
+
+test('PiAcpSession: existing session title disables auto-title', async () => {
+  const { session, titleProc, proc } = makeSession({ hasExistingTitle: true })
+
+  void session.prompt('Fix the login redirect loop')
+  await flushAutoTitle(titleProc)
+
+  assert.equal(titleProc.prompts.length, 0)
+  assert.deepEqual(proc.setSessionNameCalls, [])
+})
+
+test('PiAcpSession: disposes stuck title worker after timeout', async () => {
+  const { session, titleProc, proc } = makeSession({ titleTimeoutMs: 1 })
+
+  void session.prompt('Fix the login redirect loop')
+  await new Promise(r => setTimeout(r, 10))
+
+  assert.equal(titleProc.disposeCount, 1)
+  assert.deepEqual(proc.setSessionNameCalls, ['Fix the login redirect loop'])
+})
+
+test('PiAcpSession: dispose stops active title worker and prevents late title updates', async () => {
+  const { session, titleProc, proc } = makeSession()
+
+  void session.prompt('Fix the login redirect loop')
+  await new Promise(r => setTimeout(r, 0))
+  session.dispose()
+  await flushAutoTitle(titleProc)
+
+  assert.equal(titleProc.disposeCount, 1)
+  assert.deepEqual(proc.setSessionNameCalls, [])
 })
