@@ -4,6 +4,8 @@ import {
   type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
+  type CloseSessionRequest,
+  type CloseSessionResponse,
   type InitializeRequest,
   type InitializeResponse,
   type ListSessionsRequest,
@@ -143,7 +145,8 @@ export class PiAcpAgent implements ACPAgent {
         sessionCapabilities: {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
-          list: {}
+          list: {},
+          close: {}
         }
       }
     }
@@ -236,13 +239,6 @@ export class PiAcpAgent implements ACPAgent {
 
     if (preludeText)
       session.setStartupInfo(preludeText)
-
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
 
     const response = {
       sessionId: session.sessionId,
@@ -391,7 +387,7 @@ export class PiAcpAgent implements ACPAgent {
         }
 
         try {
-          await session.proc.setSessionName(name)
+          await session.setManualTitle(name)
         } catch (e: any) {
           const msg = String(e?.message ?? e)
           const hint = /set_session_name/i.test(msg)
@@ -407,15 +403,6 @@ export class PiAcpAgent implements ACPAgent {
           })
           return { stopReason: 'end_turn' }
         }
-
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'session_info_update',
-            title: name,
-            updatedAt: new Date().toISOString()
-          }
-        })
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -764,6 +751,11 @@ export class PiAcpAgent implements ACPAgent {
     await session.cancel()
   }
 
+  async closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
+    this.sessions.close(params.sessionId)
+    return {}
+  }
+
   async unstable_listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
     // ACP: filter by cwd if provided.
     // Zed currently sends `{}` (no cwd), so we default to the last session cwd to
@@ -832,17 +824,19 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
+    // Replay full conversation history. Fetch before constructing the ACP session so
+    // existing named sessions don't get auto-renamed by the first resumed prompt.
+    const data = (await proc.getMessages()) as any
+    const messages = Array.isArray(data?.messages) ? data.messages : []
+
     const session = this.sessions.getOrCreate(params.sessionId, {
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       conn: this.conn,
       proc,
-      fileCommands
+      fileCommands,
+      hasExistingTitle: hasSessionInfoTitle(messages)
     })
-
-    // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
-    // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
 
     // (Optional) ensure mapping stays fresh.
     this.store.upsert({
@@ -850,10 +844,6 @@ export class PiAcpAgent implements ACPAgent {
       cwd: params.cwd,
       sessionFile
     })
-
-    // Replay full conversation history.
-    const data = (await proc.getMessages()) as any
-    const messages = Array.isArray(data?.messages) ? data.messages : []
 
     for (const m of messages) {
       const role = String(m?.role ?? '')
@@ -1339,6 +1329,16 @@ function buildStartupInfo(opts: {
 
   // Do NOT include themes (per request).
   return md.join('\n').trim() + '\n'
+}
+
+function hasSessionInfoTitle(messages: unknown[]): boolean {
+  return messages.some(message => {
+    const record = message as { role?: unknown; name?: unknown; content?: unknown }
+    if (record.role !== 'session_info') return false
+    if (typeof record.name === 'string' && record.name.trim()) return true
+    const content = record.content as { name?: unknown } | undefined
+    return typeof content?.name === 'string' && content.name.trim().length > 0
+  })
 }
 
 function readNearestPackageJson(metaUrl: string): {
