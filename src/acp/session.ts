@@ -18,6 +18,7 @@ import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { buildTitlePrompt, fallbackTitleFromPrompt, sanitizeGeneratedTitle, shouldAutoTitlePrompt } from './title.js'
 
 type TitleProcessFactory = (params: { cwd: string; piCommand?: string }) => Promise<PiRpcProcess>
+const DEFAULT_TITLE_TIMEOUT_MS = 30_000
 
 type SessionCreateParams = {
   cwd: string
@@ -25,6 +26,7 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
+  hasExistingTitle?: boolean
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -90,7 +92,7 @@ export class SessionManager {
     const s = this.sessions.get(sessionId)
     if (!s) return
     try {
-      s.proc.dispose?.()
+      s.dispose()
     } catch {
       // ignore
     }
@@ -142,7 +144,8 @@ export class SessionManager {
       proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      piCommand: params.piCommand
+      piCommand: params.piCommand,
+      hasExistingTitle: params.hasExistingTitle
     })
 
     this.sessions.set(sessionId, session)
@@ -170,7 +173,8 @@ export class SessionManager {
       proc: params.proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      piCommand: params.piCommand
+      piCommand: params.piCommand,
+      hasExistingTitle: params.hasExistingTitle
     })
 
     this.sessions.set(sessionId, session)
@@ -192,9 +196,12 @@ export class PiAcpSession {
   private readonly piCommand?: string
   private readonly autoTitleEnabled: boolean
   private readonly titleProcessFactory: TitleProcessFactory
+  private readonly titleTimeoutMs: number
 
   private autoTitleStarted = false
   private titleManuallySet = false
+  private activeTitleProc: PiRpcProcess | null = null
+  private disposed = false
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -230,6 +237,8 @@ export class PiAcpSession {
     fileCommands?: FileSlashCommand[]
     piCommand?: string
     autoTitleEnabled?: boolean
+    hasExistingTitle?: boolean
+    titleTimeoutMs?: number
     titleProcessFactory?: TitleProcessFactory
   }) {
     this.sessionId = opts.sessionId
@@ -240,6 +249,8 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
     this.piCommand = opts.piCommand
     this.autoTitleEnabled = opts.autoTitleEnabled ?? process.env.PI_ACP_AUTO_TITLE !== 'false'
+    this.autoTitleStarted = opts.hasExistingTitle ?? false
+    this.titleTimeoutMs = opts.titleTimeoutMs ?? DEFAULT_TITLE_TIMEOUT_MS
     this.titleProcessFactory = opts.titleProcessFactory ?? (params => PiRpcProcess.spawn(params))
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
@@ -265,6 +276,7 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+    if (this.disposed) throw RequestError.invalidParams(`Session is closed: ${this.sessionId}`)
     this.maybeStartAutoTitle(message)
 
     // pi RPC mode disables slash command expansion, so we do it here.
@@ -330,8 +342,15 @@ export class PiAcpSession {
     return this.cancelRequested
   }
 
+  dispose(): void {
+    this.disposed = true
+    this.activeTitleProc?.dispose()
+    this.activeTitleProc = null
+    this.proc.dispose?.()
+  }
+
   maybeStartAutoTitle(firstPrompt: string): void {
-    if (!this.autoTitleEnabled || this.autoTitleStarted || this.titleManuallySet) return
+    if (this.disposed || !this.autoTitleEnabled || this.autoTitleStarted || this.titleManuallySet) return
     if (!shouldAutoTitlePrompt(firstPrompt)) return
 
     this.autoTitleStarted = true
@@ -360,18 +379,27 @@ export class PiAcpSession {
 
     try {
       titleProc = await this.titleProcessFactory({ cwd: this.cwd, piCommand: this.piCommand })
-      const titleDone = waitForAgentEnd(titleProc)
-      await titleProc.prompt(buildTitlePrompt(firstPrompt))
-      await titleDone
+      if (this.disposed) return
+      this.activeTitleProc = titleProc
+      const titleDone = waitForAgentEnd(titleProc, this.titleTimeoutMs)
+      try {
+        await titleProc.prompt(buildTitlePrompt(firstPrompt))
+        await titleDone.promise
+      } catch (e) {
+        titleDone.cancel()
+        throw e
+      }
 
+      if (this.disposed) return
       title = sanitizeGeneratedTitle(extractLastAssistantText(await titleProc.getMessages()))
     } catch {
       title = fallbackTitleFromPrompt(firstPrompt)
     } finally {
-      titleProc?.dispose()
+      if (!this.disposed) titleProc?.dispose()
+      if (this.activeTitleProc === titleProc) this.activeTitleProc = null
     }
 
-    if (!title || this.titleManuallySet) return
+    if (!title || this.disposed || this.titleManuallySet) return
 
     await this.proc.setSessionName(title)
 
@@ -732,14 +760,31 @@ export class PiAcpSession {
   }
 }
 
-function waitForAgentEnd(proc: PiRpcProcess): Promise<void> {
-  return new Promise(resolve => {
-    const off = proc.onEvent(ev => {
+function waitForAgentEnd(proc: PiRpcProcess, timeoutMs: number): { promise: Promise<void>; cancel: () => void } {
+  let off: (() => void) | null = null
+  let timer: NodeJS.Timeout | null = null
+
+  const cleanup = () => {
+    if (timer) clearTimeout(timer)
+    timer = null
+    off?.()
+    off = null
+  }
+
+  const promise = new Promise<void>((resolve, reject) => {
+    timer = setTimeout(() => {
+      cleanup()
+      reject(new Error('title worker timed out'))
+    }, timeoutMs)
+
+    off = proc.onEvent(ev => {
       if (String((ev as any).type ?? '') !== 'agent_end') return
-      off()
+      cleanup()
       resolve()
     })
   })
+
+  return { promise, cancel: cleanup }
 }
 
 function extractLastAssistantText(messages: unknown): string {

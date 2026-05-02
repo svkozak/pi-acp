@@ -824,12 +824,18 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
+    // Replay full conversation history. Fetch before constructing the ACP session so
+    // existing named sessions don't get auto-renamed by the first resumed prompt.
+    const data = (await proc.getMessages()) as any
+    const messages = Array.isArray(data?.messages) ? data.messages : []
+
     const session = this.sessions.getOrCreate(params.sessionId, {
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       conn: this.conn,
       proc,
-      fileCommands
+      fileCommands,
+      hasExistingTitle: hasSessionInfoTitle(messages)
     })
 
     // (Optional) ensure mapping stays fresh.
@@ -838,10 +844,6 @@ export class PiAcpAgent implements ACPAgent {
       cwd: params.cwd,
       sessionFile
     })
-
-    // Replay full conversation history.
-    const data = (await proc.getMessages()) as any
-    const messages = Array.isArray(data?.messages) ? data.messages : []
 
     for (const m of messages) {
       const role = String(m?.role ?? '')
@@ -1327,6 +1329,16 @@ function buildStartupInfo(opts: {
 
   // Do NOT include themes (per request).
   return md.join('\n').trim() + '\n'
+}
+
+function hasSessionInfoTitle(messages: unknown[]): boolean {
+  return messages.some(message => {
+    const record = message as { role?: unknown; name?: unknown; content?: unknown }
+    if (record.role !== 'session_info') return false
+    if (typeof record.name === 'string' && record.name.trim()) return true
+    const content = record.content as { name?: unknown } | undefined
+    return typeof content?.name === 'string' && content.name.trim().length > 0
+  })
 }
 
 function readNearestPackageJson(metaUrl: string): {
