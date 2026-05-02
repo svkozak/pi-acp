@@ -4,6 +4,8 @@ import {
   type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
+  type CloseSessionRequest,
+  type CloseSessionResponse,
   type InitializeRequest,
   type InitializeResponse,
   type ListSessionsRequest,
@@ -143,7 +145,8 @@ export class PiAcpAgent implements ACPAgent {
         sessionCapabilities: {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
-          list: {}
+          list: {},
+          close: {}
         }
       }
     }
@@ -236,13 +239,6 @@ export class PiAcpAgent implements ACPAgent {
 
     if (preludeText)
       session.setStartupInfo(preludeText)
-
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
 
     const response = {
       sessionId: session.sessionId,
@@ -755,6 +751,11 @@ export class PiAcpAgent implements ACPAgent {
     await session.cancel()
   }
 
+  async closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
+    this.sessions.close(params.sessionId)
+    return {}
+  }
+
   async unstable_listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
     // ACP: filter by cwd if provided.
     // Zed currently sends `{}` (no cwd), so we default to the last session cwd to
@@ -830,10 +831,6 @@ export class PiAcpAgent implements ACPAgent {
       proc,
       fileCommands
     })
-
-    // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
-    // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
 
     // (Optional) ensure mapping stays fresh.
     this.store.upsert({
