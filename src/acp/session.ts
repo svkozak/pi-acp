@@ -15,6 +15,9 @@ import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/proces
 import { SessionStore } from './session-store.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
+import { buildTitlePrompt, fallbackTitleFromPrompt, sanitizeGeneratedTitle, shouldAutoTitlePrompt } from './title.js'
+
+type TitleProcessFactory = (params: { cwd: string; piCommand?: string }) => Promise<PiRpcProcess>
 
 type SessionCreateParams = {
   cwd: string
@@ -55,7 +58,10 @@ function findUniqueLineNumber(text: string, needle: string): number | undefined 
 }
 
 function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
-  const path = typeof (args as { path?: unknown } | null | undefined)?.path === 'string' ? (args as { path: string }).path : undefined
+  const path =
+    typeof (args as { path?: unknown } | null | undefined)?.path === 'string'
+      ? (args as { path: string }).path
+      : undefined
   if (!path) return undefined
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
@@ -135,7 +141,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      piCommand: params.piCommand
     })
 
     this.sessions.set(sessionId, session)
@@ -162,7 +169,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      piCommand: params.piCommand
     })
 
     this.sessions.set(sessionId, session)
@@ -181,6 +189,12 @@ export class PiAcpSession {
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
   private readonly fileCommands: FileSlashCommand[]
+  private readonly piCommand?: string
+  private readonly autoTitleEnabled: boolean
+  private readonly titleProcessFactory: TitleProcessFactory
+
+  private autoTitleStarted = false
+  private titleManuallySet = false
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -214,6 +228,9 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    piCommand?: string
+    autoTitleEnabled?: boolean
+    titleProcessFactory?: TitleProcessFactory
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -221,6 +238,9 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.piCommand = opts.piCommand
+    this.autoTitleEnabled = opts.autoTitleEnabled ?? process.env.PI_ACP_AUTO_TITLE !== 'false'
+    this.titleProcessFactory = opts.titleProcessFactory ?? (params => PiRpcProcess.spawn(params))
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -245,6 +265,7 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+    this.maybeStartAutoTitle(message)
 
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
@@ -307,6 +328,58 @@ export class PiAcpSession {
 
   wasCancelRequested(): boolean {
     return this.cancelRequested
+  }
+
+  maybeStartAutoTitle(firstPrompt: string): void {
+    if (!this.autoTitleEnabled || this.autoTitleStarted || this.titleManuallySet) return
+    if (!shouldAutoTitlePrompt(firstPrompt)) return
+
+    this.autoTitleStarted = true
+
+    void this.generateAndSetTitle(firstPrompt).catch(() => {
+      // Best effort only. Auto-title must never fail the user's prompt.
+    })
+  }
+
+  async setManualTitle(name: string): Promise<void> {
+    this.titleManuallySet = true
+    this.autoTitleStarted = true
+
+    await this.proc.setSessionName(name)
+
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      title: name,
+      updatedAt: new Date().toISOString()
+    })
+  }
+
+  private async generateAndSetTitle(firstPrompt: string): Promise<void> {
+    let title = ''
+    let titleProc: PiRpcProcess | null = null
+
+    try {
+      titleProc = await this.titleProcessFactory({ cwd: this.cwd, piCommand: this.piCommand })
+      const titleDone = waitForAgentEnd(titleProc)
+      await titleProc.prompt(buildTitlePrompt(firstPrompt))
+      await titleDone
+
+      title = sanitizeGeneratedTitle(extractLastAssistantText(await titleProc.getMessages()))
+    } catch {
+      title = fallbackTitleFromPrompt(firstPrompt)
+    } finally {
+      titleProc?.dispose()
+    }
+
+    if (!title || this.titleManuallySet) return
+
+    await this.proc.setSessionName(title)
+
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      title,
+      updatedAt: new Date().toISOString()
+    })
   }
 
   private emit(update: SessionUpdate): void {
@@ -596,7 +669,10 @@ export class PiAcpSession {
       case 'auto_compaction_start': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Context nearing limit, running automatic compaction...' } satisfies ContentBlock
+          content: {
+            type: 'text',
+            text: 'Context nearing limit, running automatic compaction...'
+          } satisfies ContentBlock
         })
         break
       }
@@ -654,6 +730,44 @@ export class PiAcpSession {
         break
     }
   }
+}
+
+function waitForAgentEnd(proc: PiRpcProcess): Promise<void> {
+  return new Promise(resolve => {
+    const off = proc.onEvent(ev => {
+      if (String((ev as any).type ?? '') !== 'agent_end') return
+      off()
+      resolve()
+    })
+  })
+}
+
+function extractLastAssistantText(messages: unknown): string {
+  const list = Array.isArray(messages)
+    ? messages
+    : Array.isArray((messages as any)?.messages)
+      ? (messages as any).messages
+      : []
+
+  for (const message of [...list].reverse()) {
+    const role = String((message as any)?.role ?? '')
+    if (role && role !== 'assistant') continue
+
+    const content = (message as any)?.content ?? (message as any)?.message
+    if (typeof content === 'string') return content
+
+    if (Array.isArray(content)) {
+      return content
+        .map(part => {
+          if (typeof part === 'string') return part
+          if (typeof (part as any)?.text === 'string') return (part as any).text
+          return ''
+        })
+        .join('')
+    }
+  }
+
+  return ''
 }
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {

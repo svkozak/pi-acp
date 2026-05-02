@@ -17,6 +17,9 @@ export class FakePiRpcProcess {
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   abortCount = 0
+  disposeCount = 0
+  readonly setSessionNameCalls: string[] = []
+  messages: any = { messages: [] }
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -37,7 +40,6 @@ export class FakePiRpcProcess {
     this.abortCount += 1
   }
 
-
   async getState(): Promise<any> {
     return {}
   }
@@ -47,7 +49,15 @@ export class FakePiRpcProcess {
   }
 
   async getMessages(): Promise<any> {
-    return { messages: [] }
+    return this.messages
+  }
+
+  async setSessionName(name: string): Promise<void> {
+    this.setSessionNameCalls.push(name)
+  }
+
+  dispose(): void {
+    this.disposeCount += 1
   }
 }
 

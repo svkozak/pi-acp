@@ -19,6 +19,7 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
   const { join } = await import('node:path')
   const dir = mkdtempSync(join(tmpdir(), 'pi-acp-quietstartup-'))
   writeFileSync(join(dir, 'settings.json'), JSON.stringify({ quietStartup: true }, null, 2), 'utf-8')
+  writeFileSync(join(dir, 'auth.json'), JSON.stringify({ test: true }, null, 2), 'utf-8')
   process.env.PI_CODING_AGENT_DIR = dir
 
   // Spy on setTimeout calls (agent schedules startup info + available commands)
