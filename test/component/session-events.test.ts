@@ -400,6 +400,70 @@ test('PiAcpSession: emits edit tool line when oldText matches uniquely', async (
   assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: filePath, line: 3 }])
 })
 
+test('PiAcpSession: emits edit tool line from edits array when oldText matches uniquely', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-lines-edits-'))
+  const filePath = join(cwd, 'a.txt')
+
+  mkdirSync(cwd, { recursive: true })
+  writeFileSync(filePath, 'one\ntwo\nneedle\nthree\n', 'utf8')
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd,
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'tool_execution_start',
+    toolCallId: 't1',
+    toolName: 'edit',
+    args: { path: 'a.txt', edits: [{ oldText: 'needle', newText: 'replacement' }] }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
+  assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: filePath, line: 3 }])
+})
+
+test('PiAcpSession: emits edit tool line from stringified edits array', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-lines-edits-string-'))
+  const filePath = join(cwd, 'a.txt')
+
+  mkdirSync(cwd, { recursive: true })
+  writeFileSync(filePath, 'one\ntwo\nneedle\nthree\n', 'utf8')
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd,
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'tool_execution_start',
+    toolCallId: 't1',
+    toolName: 'edit',
+    args: { path: 'a.txt', edits: JSON.stringify([{ oldText: 'needle', newText: 'replacement' }]) }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
+  assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: filePath, line: 3 }])
+})
+
 test('PiAcpSession: omits edit tool line when oldText matches multiple times', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

@@ -54,8 +54,43 @@ function findUniqueLineNumber(text: string, needle: string): number | undefined 
   return line
 }
 
+function getToolPath(args: unknown): string | undefined {
+  const record = args as { path?: unknown; file_path?: unknown } | null | undefined
+  if (typeof record?.path === 'string') return record.path
+  if (typeof record?.file_path === 'string') return record.file_path
+  return undefined
+}
+
+// Match pi's current edit schema: { path, edits: [{ oldText, newText }] }, with
+// legacy top-level oldText/newText still accepted. Pi also normalizes stringified edits.
+// https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/tools/edit.ts
+function getEditOldTexts(args: unknown): string[] {
+  const record = args as { oldText?: unknown; edits?: unknown } | null | undefined
+  const oldTexts: string[] = []
+
+  if (typeof record?.oldText === 'string') oldTexts.push(record.oldText)
+
+  let edits = record?.edits
+  if (typeof edits === 'string') {
+    try {
+      edits = JSON.parse(edits) as unknown
+    } catch {
+      edits = undefined
+    }
+  }
+
+  if (Array.isArray(edits)) {
+    for (const edit of edits) {
+      const oldText = (edit as { oldText?: unknown } | null | undefined)?.oldText
+      if (typeof oldText === 'string') oldTexts.push(oldText)
+    }
+  }
+
+  return oldTexts
+}
+
 function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
-  const path = typeof (args as { path?: unknown } | null | undefined)?.path === 'string' ? (args as { path: string }).path : undefined
+  const path = getToolPath(args)
   if (!path) return undefined
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
@@ -464,15 +499,17 @@ export class PiAcpSession {
 
         // Capture pre-edit file contents so we can emit a structured ACP diff on completion.
         if (toolName === 'edit') {
-          const p = typeof args?.path === 'string' ? args.path : undefined
+          const p = getToolPath(args)
           if (p) {
             try {
               const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
               const oldText = readFileSync(abs, 'utf8')
               this.editSnapshots.set(toolCallId, { path: p, oldText })
 
-              const needle = typeof args?.oldText === 'string' ? args.oldText : ''
-              line = findUniqueLineNumber(oldText, needle)
+              for (const needle of getEditOldTexts(args)) {
+                line = findUniqueLineNumber(oldText, needle)
+                if (typeof line === 'number') break
+              }
             } catch {
               // Ignore snapshot failures; we'll fall back to plain text output.
             }
