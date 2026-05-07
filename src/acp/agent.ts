@@ -159,7 +159,9 @@ export class PiAcpAgent implements ACPAgent {
     // IMPORTANT: pi exits immediately in --mode rpc if no model is available (no auth configured).
     // So we must detect that situation without spawning pi, and return AUTH_REQUIRED so clients
     // (e.g. Zed) can show the Authenticate banner and launch a terminal login.
-    if (!hasAnyPiAuthConfigured()) {
+    // PI_ACP_SKIP_PI_AUTH is an opt-out for users on dynamic/custom providers (e.g. LMStudio)
+    // whose models only register after pi spawns, so the static check would falsely reject them.
+    if (process.env.PI_ACP_SKIP_PI_AUTH !== 'true' && !hasAnyPiAuthConfigured()) {
       throw RequestError.authRequired(
         { authMethods: getAuthMethods() },
         'Configure an API key or log in with an OAuth provider.'

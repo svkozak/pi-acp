@@ -115,6 +115,9 @@ Point your ACP client to the built `dist/index.js`:
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
 
+- `PI_ACP_SKIP_PI_AUTH=true` bypasses the pre-spawn auth probe. Use this when relying on pi custom/dynamic providers (e.g. LMStudio) whose models only register after pi starts. With this set, `pi-acp` will spawn pi even if no static API key is detected; if pi truly has no model available, it will still surface an auth-required error at runtime.
+- Default: unset/any other value means the auth check runs normally.
+
 You can add the environment variable in the Zed settings with:
 
 ```json
