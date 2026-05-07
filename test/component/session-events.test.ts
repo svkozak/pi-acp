@@ -75,7 +75,7 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
     fileCommands: []
   })
 
-  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { cmd: 'ls' } })
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls' } })
   proc.emit({
     type: 'tool_execution_update',
     toolCallId: 't1',
@@ -94,16 +94,34 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
 
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
   assert.equal((conn.updates[0]!.update as any).toolCallId, 't1')
+  assert.equal((conn.updates[0]!.update as any).title, 'ls')
+  assert.equal((conn.updates[0]!.update as any).kind, 'execute')
   assert.equal((conn.updates[0]!.update as any).status, 'in_progress')
   assert.equal((conn.updates[0]!.update as any).locations, undefined)
+  assert.deepEqual((conn.updates[0]!.update as any).content, [{ type: 'terminal', terminalId: 't1' }])
+  assert.deepEqual((conn.updates[0]!.update as any)._meta, {
+    terminal_info: { terminal_id: 't1', cwd: process.cwd() }
+  })
+  assert.equal((conn.updates[0]!.update as any).rawInput, undefined)
 
   assert.equal(conn.updates[1]!.update.sessionUpdate, 'tool_call_update')
   assert.equal((conn.updates[1]!.update as any).toolCallId, 't1')
   assert.equal((conn.updates[1]!.update as any).status, 'in_progress')
+  assert.equal((conn.updates[1]!.update as any).content, undefined)
+  assert.deepEqual((conn.updates[1]!.update as any)._meta, {
+    terminal_output: { terminal_id: 't1', data: 'running' }
+  })
+  assert.equal((conn.updates[1]!.update as any).rawOutput, undefined)
 
   assert.equal(conn.updates[2]!.update.sessionUpdate, 'tool_call_update')
   assert.equal((conn.updates[2]!.update as any).toolCallId, 't1')
   assert.equal((conn.updates[2]!.update as any).status, 'completed')
+  assert.equal((conn.updates[2]!.update as any).content, undefined)
+  assert.deepEqual((conn.updates[2]!.update as any)._meta, {
+    terminal_output: { terminal_id: 't1', data: 'done' },
+    terminal_exit: { terminal_id: 't1', exit_code: 0, signal: null }
+  })
+  assert.equal((conn.updates[2]!.update as any).rawOutput, undefined)
 })
 
 test('PiAcpSession: emits tool locations from pi path args', async () => {

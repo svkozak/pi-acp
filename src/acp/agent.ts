@@ -26,6 +26,16 @@ import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import {
+  bashCommand,
+  bashExitCode,
+  bashResultText,
+  bashTerminalContent,
+  bashTerminalExitMeta,
+  bashTerminalInfoMeta,
+  bashTerminalOutputMeta,
+  isBashTool
+} from './translate/bash.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
@@ -888,6 +898,37 @@ export class PiAcpAgent implements ACPAgent {
         const toolName = String((m as any)?.toolName ?? 'tool')
         const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
         const isError = Boolean((m as any)?.isError)
+        const isBash = isBashTool(toolName)
+
+        if (isBash) {
+          const text = bashResultText(m)
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId,
+              title: bashCommand(m) ?? toolName,
+              kind: 'execute',
+              status: 'completed',
+              content: bashTerminalContent(toolCallId),
+              _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
+            }
+          })
+
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId,
+              status: isError ? 'failed' : 'completed',
+              _meta: {
+                ...(text ? bashTerminalOutputMeta(toolCallId, text) : {}),
+                ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
+              }
+            }
+          })
+          continue
+        }
 
         // Create a synthetic ACP tool call to render historic tool usage.
         await this.conn.sessionUpdate({
