@@ -30,12 +30,12 @@ import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
+import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
-import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { hasAnyPiAuthConfigured } from '../pi-auth/status.js'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -115,6 +115,25 @@ export class PiAcpAgent implements ACPAgent {
     void _config
   }
 
+  private cleanupFailedNewSession(sessionId: string, state?: any | null): void {
+    this.sessions.close(sessionId)
+
+    const sessionFile =
+      typeof state?.sessionFile === 'string' && state.sessionFile.trim()
+        ? state.sessionFile
+        : this.store.get(sessionId)?.sessionFile
+
+    if (typeof sessionFile === 'string' && sessionFile.trim()) {
+      try {
+        if (existsSync(sessionFile)) unlinkSync(sessionFile)
+      } catch {
+        // ignore cleanup failures; the auth/internal error is the primary result
+      }
+    }
+
+    this.store.delete(sessionId)
+  }
+
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
@@ -156,16 +175,6 @@ export class PiAcpAgent implements ACPAgent {
 
     this.lastSessionCwd = params.cwd
 
-    // IMPORTANT: pi exits immediately in --mode rpc if no model is available (no auth configured).
-    // So we must detect that situation without spawning pi, and return AUTH_REQUIRED so clients
-    // (e.g. Zed) can show the Authenticate banner and launch a terminal login.
-    if (!hasAnyPiAuthConfigured()) {
-      throw RequestError.authRequired(
-        { authMethods: getAuthMethods() },
-        'Configure an API key or log in with an OAuth provider.'
-      )
-    }
-
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
@@ -181,6 +190,8 @@ export class PiAcpAgent implements ACPAgent {
     // Fetch state + models once (parallel) to reduce startup latency.
     let state: any = null
     let availableModels: any = null
+    let stateErr: unknown = null
+    let availableModelsErr: unknown = null
 
     await Promise.all([
       session.proc
@@ -188,7 +199,8 @@ export class PiAcpAgent implements ACPAgent {
         .then(s => {
           state = s as any
         })
-        .catch(() => {
+        .catch(err => {
+          stateErr = err
           state = null
         }),
       session.proc
@@ -196,20 +208,37 @@ export class PiAcpAgent implements ACPAgent {
         .then(m => {
           availableModels = m as any
         })
-        .catch(() => {
+        .catch(err => {
+          availableModelsErr = err
           availableModels = null
         })
     ])
 
-    // Proactive auth gate: if pi has no models available, it's effectively unauthenticated.
+    const availableModelsAuthErr = maybeAuthRequiredError(availableModelsErr)
+
+    if (availableModelsAuthErr) {
+      this.cleanupFailedNewSession(session.sessionId, state)
+      throw availableModelsAuthErr
+    }
+
+    if (availableModelsErr) {
+      this.cleanupFailedNewSession(session.sessionId, state)
+      throw RequestError.internalError({}, String((availableModelsErr as Error)?.message ?? availableModelsErr))
+    }
+
+    // If pi has no models available after spawning, it's effectively unauthenticated.
     const rawModelsCount = Array.isArray(availableModels?.models) ? availableModels.models.length : 0
 
     if (rawModelsCount === 0) {
-      try {
-        session.proc.dispose?.()
-      } catch {
-        // ignore
-      }
+      this.cleanupFailedNewSession(session.sessionId, state)
+      throw RequestError.authRequired(
+        { authMethods: getAuthMethods() },
+        'Configure an API key or log in with an OAuth provider.'
+      )
+    }
+
+    if (stateErr && maybeAuthRequiredError(stateErr)) {
+      this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.authRequired(
         { authMethods: getAuthMethods() },
         'Configure an API key or log in with an OAuth provider.'

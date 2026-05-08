@@ -58,4 +58,11 @@ export class SessionStore {
     }
     saveFile(this.path, db)
   }
+
+  delete(sessionId: string): void {
+    const db = loadFile(this.path)
+    if (!db.sessions[sessionId]) return
+    delete db.sessions[sessionId]
+    saveFile(this.path, db)
+  }
 }

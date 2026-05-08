@@ -4,9 +4,16 @@ import { PiAcpAgent } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 
 class FakeSessions {
+  closeCalls: string[] = []
+
   constructor(private readonly session: any) {}
+
   async create(_params: any) {
     return this.session
+  }
+
+  close(sessionId: string) {
+    this.closeCalls.push(sessionId)
   }
 }
 
@@ -17,21 +24,18 @@ test('PiAcpAgent: newSession throws AUTH_REQUIRED when pi reports zero available
     sessionId: 's1',
     cwd: process.cwd(),
     proc: {
-      disposeCalled: 0,
       async getAvailableModels() {
         return { models: [] }
       },
       async getState() {
         return { thinkingLevel: 'medium', model: null }
-      },
-      dispose() {
-        this.disposeCalled += 1
       }
     }
   }
 
+  const sessions = new FakeSessions(session)
   const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
-  ;(agent as any).sessions = new FakeSessions(session) as any
+  ;(agent as any).sessions = sessions as any
 
   let threw = false
   try {
@@ -43,5 +47,5 @@ test('PiAcpAgent: newSession throws AUTH_REQUIRED when pi reports zero available
   }
 
   assert.equal(threw, true)
-  assert.equal((session.proc as any).disposeCalled, 1)
+  assert.deepEqual(sessions.closeCalls, ['s1'])
 })
