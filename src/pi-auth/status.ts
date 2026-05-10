@@ -14,7 +14,7 @@ function safeReadJson(path: string): any | null {
 }
 
 export function getPiAgentDir(): string {
-  // pi-mono uses ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`.
+  // pi uses ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`.
   // Default APP_NAME is "pi".
   const envDir = process.env.PI_CODING_AGENT_DIR
   if (envDir) {
