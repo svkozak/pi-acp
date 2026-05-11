@@ -25,6 +25,15 @@ export function getPiAgentDir(): string {
   return join(homedir(), '.pi', 'agent')
 }
 
+function hasGoogleVertexAuth(): boolean {
+  const credentialsPath = process.env['GOOGLE_APPLICATION_CREDENTIALS']?.trim()
+  const defaultCredentialsPath = join(homedir(), '.config', 'gcloud', 'application_default_credentials.json')
+  const hasCredentials = (credentialsPath && existsSync(credentialsPath)) || existsSync(defaultCredentialsPath)
+  const hasProject = !!(process.env['GOOGLE_CLOUD_PROJECT']?.trim() || process.env['GCLOUD_PROJECT']?.trim())
+  const hasLocation = !!process.env['GOOGLE_CLOUD_LOCATION']?.trim()
+  return !!(hasCredentials && hasProject && hasLocation)
+}
+
 export function hasAnyPiAuthConfigured(): boolean {
   // 1) auth.json present and non-empty (api keys or oauth creds)
   const agentDir = getPiAgentDir()
@@ -69,17 +78,16 @@ export function hasAnyPiAuthConfigured(): boolean {
     'GITHUB_TOKEN',
     // Anthropic oauth
     'ANTHROPIC_OAUTH_TOKEN',
-    'ANTHROPIC_API_KEY',
-    // Google Vertex AI support using `gloud auth application-default login` or a credentials file
-    'GOOGLE_APPLICATION_CREDENTIALS',
-    'GOOGLE_CLOUD_PROJECT',
-    'GOOGLE_CLOUD_LOCATION'
+    'ANTHROPIC_API_KEY'
   ]
 
   for (const k of envVars) {
     const v = process.env[k]
     if (typeof v === 'string' && v.trim()) return true
   }
+
+  // 4) Google Vertex AI auth (credentials + project + location)
+  if (hasGoogleVertexAuth()) return true
 
   return false
 }
