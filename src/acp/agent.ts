@@ -555,7 +555,7 @@ export class PiAcpAgent implements ACPAgent {
         // Read pi's installed CHANGELOG.md. Adapter-side, no model call.
         const findChangelog = (): string | null => {
           // 1) Locate the installed pi package by resolving the `pi` executable.
-          // On Node installs, `pi` typically resolves to .../@mariozechner/pi-coding-agent/dist/cli.js
+          // On Node installs, `pi` typically resolves to .../@earendil-works/pi-coding-agent/dist/cli.js
           try {
             const whichCmd = process.platform === 'win32' ? 'where' : 'which'
             const which = spawnSync(whichCmd, ['pi'], { encoding: 'utf-8' })
@@ -578,7 +578,7 @@ export class PiAcpAgent implements ACPAgent {
             const npmRoot = spawnSync('npm', ['root', '-g'], { encoding: 'utf-8' })
             const root = String(npmRoot.stdout ?? '').trim()
             if (root) {
-              const p = join(root, '@mariozechner', 'pi-coding-agent', 'CHANGELOG.md')
+              const p = join(root, '@earendil-works', 'pi-coding-agent', 'CHANGELOG.md')
               if (existsSync(p)) return p
             }
           } catch {
@@ -1196,7 +1196,7 @@ function buildUpdateNotice(): string | null {
 
     if (!installed || !isSemver(installed)) return null
 
-    const latestRes = spawnSync('npm', ['view', '@mariozechner/pi-coding-agent', 'version'], {
+    const latestRes = spawnSync('npm', ['view', '@earendil-works/pi-coding-agent', 'version'], {
       encoding: 'utf-8',
       timeout: 800
     })
@@ -1207,7 +1207,7 @@ function buildUpdateNotice(): string | null {
     if (!latest || !isSemver(latest)) return null
     if (compareSemver(latest, installed) <= 0) return null
 
-    return `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @mariozechner/pi-coding-agent\``
+    return `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @earendil-works/pi-coding-agent\``
   } catch {
     return null
   }
