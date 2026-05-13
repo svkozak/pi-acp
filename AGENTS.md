@@ -60,6 +60,11 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 - Avoid producing unnecessary comments! Use comments sparingly to explain non-obvious decisions, not to narrate code.
 - Avoid using `any` in TypeScript; prefer explicit types and interfaces. Only use `any` when absolutely necessary (e.g. for untyped external data).
 
+## Validation
+
+- After making code edits, run formatting before finishing the task. Use `npm run format` when it is safe to format the whole worktree; otherwise use the narrowest safe formatter command for the files you touched.
+- If formatting is skipped or fails, say so explicitly in the final response.
+
 ## Source control
 
 - **DO NOT** commit unless explicitly asked!

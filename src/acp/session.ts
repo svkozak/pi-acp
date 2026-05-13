@@ -55,7 +55,10 @@ function findUniqueLineNumber(text: string, needle: string): number | undefined 
 }
 
 function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
-  const path = typeof (args as { path?: unknown } | null | undefined)?.path === 'string' ? (args as { path: string }).path : undefined
+  const path =
+    typeof (args as { path?: unknown } | null | undefined)?.path === 'string'
+      ? (args as { path: string }).path
+      : undefined
   if (!path) return undefined
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
@@ -612,7 +615,10 @@ export class PiAcpSession {
       case 'auto_compaction_start': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Context nearing limit, running automatic compaction...' } satisfies ContentBlock
+          content: {
+            type: 'text',
+            text: 'Context nearing limit, running automatic compaction...'
+          } satisfies ContentBlock
         })
         break
       }
