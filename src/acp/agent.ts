@@ -1340,22 +1340,23 @@ function buildStartupInfo(opts: {
     // ignore
   }
 
-  // Also show npm packages from pi settings (best-effort)
-  try {
-    const settingsPath = join(process.env.HOME ?? '', '.pi', 'agent', 'settings.json')
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as any
-    const pkgs: string[] = Array.isArray(settings?.packages) ? settings.packages : []
-    for (const pkg of pkgs) {
-      const s = String(pkg)
-      if (s.startsWith('npm:')) {
-        // Render a two-line bullet structure using markdown indentation.
-        extItems.push(`${s}\n  - index.ts`)
-      } else {
-        extItems.push(s)
+  // Also show npm packages from pi settings (global + project)
+  const settingsPaths = [join(getAgentDir(), 'settings.json'), join(opts.cwd, '.pi', 'settings.json')]
+  for (const settingsPath of settingsPaths) {
+    try {
+      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as any
+      const pkgs: string[] = Array.isArray(settings?.packages) ? settings.packages : []
+      for (const pkg of pkgs) {
+        const s = String(pkg)
+        if (s.startsWith('npm:')) {
+          extItems.push(`${s}\n  - index.ts`)
+        } else {
+          extItems.push(s)
+        }
       }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
 
   addSection('Extensions', extItems)
