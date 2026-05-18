@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import * as readline from 'node:readline'
+import { StringDecoder } from 'node:string_decoder'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
 export class PiRpcSpawnError extends Error {
@@ -80,8 +80,14 @@ export class PiRpcProcess {
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
 
-    const rl = readline.createInterface({ input: child.stdout })
-    rl.on('line', line => {
+    // Pi RPC uses strict LF-only JSONL framing. Node readline also splits on
+    // U+2028/U+2029 which are valid inside JSON strings, corrupting the stream.
+    // Use a manual buffer that splits only on \n.
+    const decoder = new StringDecoder('utf8')
+    let buf = ''
+
+    const onLine = (line: string) => {
+      if (line.endsWith('\r')) line = line.slice(0, -1)
       if (!line.trim()) return
       let msg: any
       try {
@@ -107,6 +113,20 @@ export class PiRpcProcess {
       }
 
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
+    }
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      buf += decoder.write(chunk)
+      let nl: number
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        onLine(buf.slice(0, nl))
+        buf = buf.slice(nl + 1)
+      }
+    })
+
+    child.stdout.on('end', () => {
+      buf += decoder.end()
+      if (buf.length > 0) onLine(buf)
     })
 
     child.on('exit', (code, signal) => {
