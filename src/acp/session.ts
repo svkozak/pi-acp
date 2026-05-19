@@ -179,8 +179,7 @@ export class PiAcpSession {
   readonly mcpServers: McpServer[]
 
   private startupInfo: string | null = null
-  private startupInfoSentOutOfTurn = false
-  private startupInfoSentInPrompt = false
+  private startupInfoSent = false
 
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
@@ -231,8 +230,7 @@ export class PiAcpSession {
 
   setStartupInfo(text: string) {
     this.startupInfo = text
-    this.startupInfoSentOutOfTurn = false
-    this.startupInfoSentInPrompt = false
+    this.startupInfoSent = false
   }
 
   /**
@@ -241,19 +239,16 @@ export class PiAcpSession {
    * callers can invoke this shortly after session/new returns.
    */
   sendStartupInfoIfPending(): void {
-    if (this.startupInfoSentOutOfTurn || !this.startupInfo) return
-    this.startupInfoSentOutOfTurn = true
-
-    this.emit({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: this.startupInfo }
-    })
+    this.sendStartupInfo()
   }
 
   private sendStartupInfoOnFirstPromptIfPending(): void {
-    if (this.startupInfoSentInPrompt || !this.startupInfo) return
-    this.startupInfoSentInPrompt = true
+    this.sendStartupInfo()
+  }
 
+  private sendStartupInfo(): void {
+    if (this.startupInfoSent || !this.startupInfo) return
+    this.startupInfoSent = true
     this.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: this.startupInfo }
