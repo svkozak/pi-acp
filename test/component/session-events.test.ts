@@ -304,6 +304,31 @@ test('PiAcpSession: emits agent_message_chunk for auto_compaction_end', async ()
   })
 })
 
+test('PiAcpSession: emits session_info_update for session_info_changed', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'session_info_changed', name: 'Generated Title' })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.equal(conn.updates[0]!.sessionId, 's1')
+  const update = conn.updates[0]!.update
+  if (update.sessionUpdate !== 'session_info_update') assert.fail(`unexpected update: ${update.sessionUpdate}`)
+  assert.equal(update.title, 'Generated Title')
+  assert.equal(typeof update.updatedAt, 'string')
+})
+
 test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with text_delta events', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

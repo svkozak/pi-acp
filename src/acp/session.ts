@@ -634,6 +634,16 @@ export class PiAcpSession {
         break
       }
 
+      case 'session_info_changed': {
+        const title = typeof ev.name === 'string' ? ev.name : null
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          title,
+          updatedAt: new Date().toISOString()
+        })
+        break
+      }
+
       case 'agent_start': {
         this.inAgentLoop = true
         break
