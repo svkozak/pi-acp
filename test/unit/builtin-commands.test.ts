@@ -55,3 +55,68 @@ test('PiAcpAgent: /name sets session display name adapter-side', async () => {
   const last = conn.updates.at(-1)
   assert.match((last as any).update.content.text, /Session name set: My Session/)
 })
+
+test('PiAcpAgent: /reload is handled adapter-side', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess() as any
+  proc.getCommands = async () => ({ commands: [] })
+
+  let reloaded = false
+
+  const agent = new PiAcpAgent(asAgentConn(conn))
+  ;(agent as any).sessions = new FakeSessions({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    proc,
+    fileCommands: [],
+    isBusy: () => false,
+    reload: async () => {
+      reloaded = true
+    }
+  }) as any
+
+  const res = await agent.prompt({
+    sessionId: 's1',
+    prompt: [{ type: 'text', text: '/reload' }]
+  } as any)
+
+  assert.equal(res.stopReason, 'end_turn')
+  assert.equal(proc.prompts.length, 0)
+  assert.equal(reloaded, true)
+
+  const commandsUpdate = conn.updates.find(u => (u as any).update?.sessionUpdate === 'available_commands_update')
+  assert.ok(commandsUpdate)
+  assert.ok((commandsUpdate as any).update.availableCommands.some((c: any) => c.name === 'reload'))
+
+  const last = conn.updates.at(-1)
+  assert.match((last as any).update.content.text, /Reloaded prompts, skills, extensions, and context files/)
+})
+
+test('PiAcpAgent: /reload waits until idle', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess() as any
+
+  let reloaded = false
+
+  const agent = new PiAcpAgent(asAgentConn(conn))
+  ;(agent as any).sessions = new FakeSessions({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    proc,
+    fileCommands: [],
+    isBusy: () => true,
+    reload: async () => {
+      reloaded = true
+    }
+  }) as any
+
+  const res = await agent.prompt({
+    sessionId: 's1',
+    prompt: [{ type: 'text', text: '/reload' }]
+  } as any)
+
+  assert.equal(res.stopReason, 'end_turn')
+  assert.equal(reloaded, false)
+  const last = conn.updates.at(-1)
+  assert.match((last as any).update.content.text, /Wait for the current response to finish before reloading/)
+})

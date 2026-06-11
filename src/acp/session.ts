@@ -182,9 +182,10 @@ export class PiAcpSession {
   private startupInfoSentOutOfTurn = false
   private startupInfoSentInPrompt = false
 
-  readonly proc: PiRpcProcess
+  private _proc: PiRpcProcess
+  private procUnsubscribe: (() => void) | null = null
   private readonly conn: AgentSideConnection
-  private readonly fileCommands: FileSlashCommand[]
+  private fileCommands: FileSlashCommand[]
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -222,11 +223,20 @@ export class PiAcpSession {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
     this.mcpServers = opts.mcpServers
-    this.proc = opts.proc
+    this._proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.bindProc(this._proc)
+  }
+
+  get proc(): PiRpcProcess {
+    return this._proc
+  }
+
+  private bindProc(proc: PiRpcProcess): void {
+    this.procUnsubscribe?.()
+    this.procUnsubscribe = proc.onEvent(ev => this.handlePiEvent(ev))
   }
 
   setStartupInfo(text: string) {
@@ -258,6 +268,48 @@ export class PiAcpSession {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: this.startupInfo }
     })
+  }
+
+  isBusy(): boolean {
+    return this.pendingTurn !== null || this.inAgentLoop || this.turnQueue.length > 0
+  }
+
+  async reload(opts: { fileCommands?: FileSlashCommand[]; piCommand?: string } = {}): Promise<void> {
+    if (this.isBusy()) {
+      throw new Error('Cannot reload while a prompt is running or queued.')
+    }
+
+    const state = (await this._proc.getState()) as any
+    const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile.trim() : ''
+
+    if (!sessionFile) {
+      throw new Error('Cannot reload session: session file unavailable.')
+    }
+
+    const nextProc = await PiRpcProcess.spawn({
+      cwd: this.cwd,
+      sessionPath: sessionFile,
+      piCommand: opts.piCommand
+    })
+
+    const previousProc = this._proc
+    this._proc = nextProc
+    this.bindProc(nextProc)
+
+    if (opts.fileCommands) {
+      this.fileCommands = opts.fileCommands
+    }
+
+    this.cancelRequested = false
+    this.inAgentLoop = false
+    this.currentToolCalls.clear()
+    this.editSnapshots.clear()
+
+    try {
+      previousProc.dispose?.()
+    } catch {
+      // ignore
+    }
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
@@ -321,7 +373,7 @@ export class PiAcpSession {
     }
 
     // Abort the currently running turn (if any). If nothing is running, this is a no-op.
-    await this.proc.abort()
+    await this._proc.abort()
   }
 
   wasCancelRequested(): boolean {
@@ -362,7 +414,7 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
     // The full prompt is finished when we see `agent_end`.
-    this.proc.prompt(t.message, t.images).catch(err => {
+    this._proc.prompt(t.message, t.images).catch(err => {
       // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
       void this.flushEmits().finally(() => {

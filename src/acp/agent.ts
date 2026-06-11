@@ -77,6 +77,10 @@ function builtinAvailableCommands(): AvailableCommand[] {
     {
       name: 'changelog',
       description: 'Show pi changelog'
+    },
+    {
+      name: 'reload',
+      description: 'Reload prompts, skills, extensions, and context files for this ACP session'
     }
   ]
 }
@@ -545,6 +549,63 @@ export class PiAcpAgent implements ACPAgent {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: `Follow-up mode set to: ${modeRaw}` }
+          }
+        })
+
+        return { stopReason: 'end_turn' }
+      }
+
+      if (cmd === 'reload') {
+        if (typeof (session as any).isBusy === 'function' && (session as any).isBusy()) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'Wait for the current response to finish before reloading.'
+              }
+            }
+          })
+          return { stopReason: 'end_turn' }
+        }
+
+        const reloadedFileCommands = loadSlashCommands(session.cwd)
+        const reloadedEnableSkillCommands = getEnableSkillCommands(session.cwd)
+
+        await session.reload({
+          fileCommands: reloadedFileCommands,
+          piCommand: process.env.PI_ACP_PI_COMMAND
+        })
+
+        let availableCommands: AvailableCommand[]
+        try {
+          const pi = (await session.proc.getCommands()) as any
+          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
+            enableSkillCommands: reloadedEnableSkillCommands,
+            includeExtensionCommands: false
+          })
+          availableCommands = mergeCommands(commands, builtinAvailableCommands())
+        } catch {
+          availableCommands = mergeCommands(toAvailableCommands(reloadedFileCommands), builtinAvailableCommands())
+        }
+
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands
+          }
+        })
+
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Reloaded prompts, skills, extensions, and context files for this session.'
+            }
           }
         })
 
