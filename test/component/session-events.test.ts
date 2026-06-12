@@ -575,7 +575,7 @@ test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
   assert.equal(reason, 'end_turn')
 })
 
-test('PiAcpSession: re-emits startup info as the first chunk of the first prompt', async () => {
+test('PiAcpSession: does not re-emit startup info on first prompt after it was already sent', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -599,16 +599,13 @@ test('PiAcpSession: re-emits startup info as the first chunk of the first prompt
 
   assert.equal(proc.prompts.length, 1)
   assert.equal(proc.prompts[0]!.message, 'hello')
-  assert.equal(conn.updates[0]!.update.sessionUpdate, 'agent_message_chunk')
-  assert.deepEqual(conn.updates[0]!.update, {
-    sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: notice }
-  })
-  assert.equal(conn.updates[1]!.update.sessionUpdate, 'agent_message_chunk')
-  assert.deepEqual(conn.updates[1]!.update, {
-    sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: notice }
-  })
+  const startupUpdates = conn.updates.filter(
+    entry =>
+      entry.update.sessionUpdate === 'agent_message_chunk' &&
+      (entry.update as any).content?.type === 'text' &&
+      (entry.update as any).content?.text === notice
+  )
+  assert.equal(startupUpdates.length, 1)
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
