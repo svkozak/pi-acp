@@ -337,38 +337,46 @@ export class PiAcpSession {
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
-    const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
-
-      // If a turn is already running, enqueue.
-      if (this.pendingTurn) {
-        this.turnQueue.push(queued)
-
-        // Best-effort: notify client that a prompt was queued.
-        // This doesn't work in Zed yet, needs to be revisited
+    // If a turn is already running, steer the agent instead of queuing.
+    if (this.pendingTurn) {
+      try {
+        await this.proc.steer(expandedMessage)
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text: `Queued message (position ${this.turnQueue.length}).`
+            text: `\u21aa Steering message delivered.`
           }
         })
+        await this.flushEmits()
+        return 'end_turn'
+      } catch {
+        // Steer not supported or failed \u2014 fall back to queue.
+        return new Promise<StopReason>(resolve => {
+          const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject: () => resolve('error') }
+          this.turnQueue.push(queued)
 
-        // Also publish queue depth via session info metadata.
-        // This also not visible in the client
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: `Queued message (position ${this.turnQueue.length}). (Steering not available)`
+            }
+          })
+
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
+          })
         })
-
-        return
       }
+    }
 
-      // No turn is running; start immediately.
+    // No turn is running; start immediately.
+    return new Promise<StopReason>((resolve, reject) => {
+      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
       this.startTurn(queued)
     })
-
-    return turnPromise
   }
 
   async cancel(): Promise<void> {

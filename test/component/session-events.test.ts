@@ -724,6 +724,7 @@ test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
 test('PiAcpSession: queues concurrent prompt and starts it after agent_end', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  proc.steerShouldFail = true
 
   const session = new PiAcpSession({
     sessionId: 's1',
@@ -736,6 +737,9 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
 
   const first = session.prompt('one')
   const second = session.prompt('two')
+
+  // Allow steer rejection microtasks to settle so 'two' enters the queue
+  await new Promise(r => setTimeout(r, 10))
 
   assert.equal(proc.prompts.length, 1)
   assert.equal(proc.prompts[0]!.message, 'one')
@@ -761,6 +765,7 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
 test('PiAcpSession: cancel clears queued prompts', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  proc.steerShouldFail = true
 
   const session = new PiAcpSession({
     sessionId: 's1',
@@ -773,6 +778,9 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
 
   const first = session.prompt('one')
   const second = session.prompt('two')
+
+  // Allow steer rejection microtasks to settle so prompts enter the queue
+  await new Promise(r => setTimeout(r, 10))
 
   assert.equal(proc.prompts.length, 1)
 
