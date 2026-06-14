@@ -259,8 +259,7 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
-    // pi RPC mode disables slash command expansion, so we do it here.
-    const expandedMessage = expandSlashCommand(message, this.fileCommands)
+    const expandedMessage = this.expandMessage(message)
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
       const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
@@ -296,6 +295,15 @@ export class PiAcpSession {
     return turnPromise
   }
 
+  async steeringPrompt(message: string, images: unknown[] = []): Promise<void> {
+    if (!this.pendingTurn) {
+      throw RequestError.invalidParams('Cannot send steering prompt without an active turn.')
+    }
+
+    const expandedMessage = this.expandMessage(message)
+    await this.proc.prompt(expandedMessage, images, 'steer')
+  }
+
   async cancel(): Promise<void> {
     // Cancel current and clear any queued prompts.
     this.cancelRequested = true
@@ -320,6 +328,11 @@ export class PiAcpSession {
 
   wasCancelRequested(): boolean {
     return this.cancelRequested
+  }
+
+  private expandMessage(message: string): string {
+    // pi RPC mode disables slash command expansion, so we do it here.
+    return expandSlashCommand(message, this.fileCommands)
   }
 
   private emit(update: SessionUpdate): void {

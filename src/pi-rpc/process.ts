@@ -28,7 +28,7 @@ function stripAnsi(s: string): string {
 }
 
 type PiRpcCommand =
-  | { type: 'prompt'; id?: string; message: string; images?: unknown[] }
+  | { type: 'prompt'; id?: string; message: string; images?: unknown[]; streamingBehavior?: 'steer' | 'followUp' }
   | { type: 'abort'; id?: string }
   | { type: 'get_state'; id?: string }
   // Model
@@ -230,8 +230,8 @@ export class PiRpcProcess {
     return lines
   }
 
-  async prompt(message: string, images: unknown[] = []): Promise<void> {
-    const res = await this.request({ type: 'prompt', message, images })
+  async prompt(message: string, images: unknown[] = [], streamingBehavior?: 'steer' | 'followUp'): Promise<void> {
+    const res = await this.request({ type: 'prompt', message, images, ...(streamingBehavior ? { streamingBehavior } : {}) })
     if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
   }
 

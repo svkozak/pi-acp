@@ -639,6 +639,30 @@ test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   assert.equal(reason, 'cancelled')
 })
 
+test('PiAcpSession: steeringPrompt forwards immediately to pi during an active turn', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  void session.prompt('one')
+  assert.equal(proc.prompts.length, 1)
+  assert.equal(proc.prompts[0]!.message, 'one')
+
+  await session.steeringPrompt('steer now')
+
+  assert.equal(proc.prompts.length, 2)
+  assert.equal(proc.prompts[1]!.message, 'steer now')
+  assert.equal(proc.prompts[1]!.streamingBehavior, 'steer')
+})
+
 test('PiAcpSession: queues concurrent prompt and starts it after agent_end', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
