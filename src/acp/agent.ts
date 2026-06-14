@@ -348,6 +348,26 @@ export class PiAcpAgent implements ACPAgent {
     return
   }
 
+  async extMethod(method: string, params: unknown): Promise<unknown> {
+    if (method === 'rookery/steering_prompt') {
+      const sessionId = typeof (params as { sessionId?: unknown } | null | undefined)?.sessionId === 'string'
+        ? (params as { sessionId: string }).sessionId
+        : ''
+      const text = typeof (params as { text?: unknown } | null | undefined)?.text === 'string'
+        ? (params as { text: string }).text.trim()
+        : ''
+
+      if (!sessionId) throw RequestError.invalidParams('Missing sessionId.')
+      if (!text) throw RequestError.invalidParams('Missing steering prompt text.')
+
+      const session = this.sessions.get(sessionId)
+      await session.steeringPrompt(text)
+      return { accepted: true }
+    }
+
+    throw RequestError.methodNotFound(`_${method}`)
+  }
+
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const session = this.sessions.get(params.sessionId)
 

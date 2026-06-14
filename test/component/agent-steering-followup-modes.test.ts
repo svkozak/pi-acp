@@ -10,6 +10,24 @@ class FakeSessions {
   }
 }
 
+test('PiAcpAgent: extMethod rookery/steering_prompt delegates to session steeringPrompt', async () => {
+  const conn = new FakeAgentSideConnection()
+  const steeringCalls: string[] = []
+
+  const agent = new PiAcpAgent(asAgentConn(conn))
+  ;(agent as any).sessions = new FakeSessions({
+    sessionId: 's1',
+    steeringPrompt: async (text: string) => {
+      steeringCalls.push(text)
+    }
+  }) as any
+
+  const result = await agent.extMethod('rookery/steering_prompt', { sessionId: 's1', text: 'please adjust' })
+
+  assert.deepEqual(result, { accepted: true })
+  assert.deepEqual(steeringCalls, ['please adjust'])
+})
+
 test('PiAcpAgent: /steering reports current steeringMode', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess() as any
