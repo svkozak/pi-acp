@@ -9,14 +9,34 @@ class FakeConn {
   }
 }
 
+class FakeSessions {
+  constructor(private readonly session: any) {}
+
+  get(sessionId: string) {
+    if (sessionId !== this.session.sessionId) throw new Error(`Unknown sessionId: ${sessionId}`)
+    return this.session
+  }
+}
+
 test('PiAcpAgent: setSessionMode maps to pi setThinkingLevel + emits current_mode_update', async () => {
   const conn = new FakeConn()
+  let requestedMode: string | null = null
   const agent = new PiAcpAgent(conn as any)
+  ;(agent as any).sessions = new FakeSessions({
+    sessionId: 's1',
+    proc: {
+      async setThinkingLevel(mode: string) {
+        requestedMode = mode
+      }
+    }
+  })
 
-  // Create a fake session by calling newSession is heavyweight (spawns pi).
-  // Instead, reach into session manager via loadSession isn't possible either.
-  // So we unit-test the mapping via a minimal fake session manager would require refactor.
-  // For now we just assert the method exists and rejects unknown mode IDs.
+  await agent.setSessionMode({ sessionId: 's1', modeId: 'high' } as any)
 
-  await assert.rejects(() => agent.setSessionMode({ sessionId: 'nope', modeId: 'invalid' } as any), /invalid params/i)
+  assert.equal(requestedMode, 'high')
+  assert.ok(
+    conn.updates.some(
+      update => update.update?.sessionUpdate === 'current_mode_update' && update.update?.modeId === 'high'
+    )
+  )
 })

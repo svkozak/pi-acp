@@ -29,6 +29,7 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  setModelCalls: Array<{ provider: string; modelId: string }> = []
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -59,6 +60,14 @@ export class FakePiRpcProcess {
 
   async getAvailableModels(): Promise<any> {
     return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
+  }
+
+  async setModel(provider: string, modelId: string): Promise<void> {
+    this.setModelCalls.push({ provider, modelId })
+  }
+
+  async getSessionStats(): Promise<any> {
+    return { tokens: { total: 42 }, cost: 0.123 }
   }
 
   async getMessages(): Promise<any> {

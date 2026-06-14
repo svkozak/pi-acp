@@ -14,7 +14,10 @@ import {
   type NewSessionRequest,
   type PromptRequest,
   type PromptResponse,
+  type SessionConfigOption,
   type SessionInfo,
+  type SetSessionConfigOptionRequest,
+  type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
   type StopReason
@@ -38,6 +41,15 @@ import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+type ModelCatalogEntry = { contextWindow?: number; description?: string }
+type UsageUpdate = {
+  sessionUpdate: 'usage_update'
+  used: number
+  size: number
+  cost?: { amount: number; currency: string } | null
+}
+
+const modelCatalogCache = new Map<string, Map<string, ModelCatalogEntry>>()
 
 function builtinAvailableCommands(): AvailableCommand[] {
   return [
@@ -246,6 +258,7 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const models = await getModelState(session.proc, { state, availableModels })
+    const configOptions = toConfigOptions(models)
     const thinking = await getThinkingState(session.proc, { state })
 
     const quietStartup = getQuietStartup(params.cwd)
@@ -275,6 +288,7 @@ export class PiAcpAgent implements ACPAgent {
 
     const response = {
       sessionId: session.sessionId,
+      ...(configOptions.length > 0 ? { configOptions } : {}),
       models,
       modes: thinking,
       _meta: {
@@ -287,6 +301,9 @@ export class PiAcpAgent implements ACPAgent {
     // Try to send it immediately after session/new returns; if the client ignores it,
     // it will still be emitted as the first chunk of the first prompt.
     if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
+    setTimeout(() => {
+      void emitUsageUpdate(this.conn, session.sessionId, session.proc, models)
+    }, 0)
 
     // Advertise slash commands (ACP: available_commands_update)
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
@@ -785,6 +802,7 @@ export class PiAcpAgent implements ACPAgent {
     const stopReason: StopReason =
       result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
 
+    await emitUsageUpdate(this.conn, session.sessionId, session.proc)
     return { stopReason }
   }
 
@@ -947,9 +965,11 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const models = await getModelState(proc)
+    const configOptions = toConfigOptions(models)
     const thinking = await getThinkingState(proc)
 
     const response = {
+      ...(configOptions.length > 0 ? { configOptions } : {}),
       models,
       modes: thinking,
       _meta: {
@@ -958,6 +978,10 @@ export class PiAcpAgent implements ACPAgent {
         }
       }
     }
+
+    setTimeout(() => {
+      void emitUsageUpdate(this.conn, session.sessionId, proc, models)
+    }, 0)
 
     // Advertise slash commands after the response so the client knows the session exists.
     setTimeout(() => {
@@ -996,36 +1020,27 @@ export class PiAcpAgent implements ACPAgent {
 
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
     const session = this.sessions.get(params.sessionId)
+    await setSessionModel(session.proc, params.modelId)
+  }
 
-    // Accept either:
-    //  - "provider/model" (preferred, matches how we advertise)
-    //  - "model" (fallback, we try to resolve via available models)
-    let provider: string | null = null
-    let modelId: string | null = null
-
-    if (params.modelId.includes('/')) {
-      const [p, ...rest] = params.modelId.split('/')
-      provider = p
-      modelId = rest.join('/')
-    } else {
-      modelId = params.modelId
+  async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
+    const session = this.sessions.get(params.sessionId)
+    if (params.configId !== 'model') {
+      throw RequestError.invalidParams(`Unknown configId: ${params.configId}`)
     }
 
-    if (!provider) {
-      const data = (await session.proc.getAvailableModels()) as any
-      const models: any[] = Array.isArray(data?.models) ? data.models : []
-      const found = models.find(m => String(m?.id) === modelId)
-      if (found) {
-        provider = String(found.provider)
-        modelId = String(found.id)
-      }
-    }
-
-    if (!provider || !modelId) {
-      throw RequestError.invalidParams(`Unknown modelId: ${params.modelId}`)
-    }
-
-    await session.proc.setModel(provider, modelId)
+    await setSessionModel(session.proc, params.value)
+    const models = await getModelState(session.proc)
+    const configOptions = toConfigOptions(models)
+    void this.conn.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'config_option_update',
+        configOptions
+      } as any
+    })
+    await emitUsageUpdate(this.conn, session.sessionId, session.proc, models)
+    return { configOptions }
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1043,8 +1058,8 @@ export class PiAcpAgent implements ACPAgent {
       sessionId: session.sessionId,
       update: {
         sessionUpdate: 'current_mode_update',
-        currentModeId: mode
-      }
+        modeId: mode
+      } as any
     })
 
     return {}
@@ -1094,6 +1109,59 @@ async function getThinkingState(
   }
 }
 
+function parseCompactTokenCount(value: string | null | undefined): number | undefined {
+  if (!value) return undefined
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)([KMB])?$/i)
+  if (!match) return undefined
+  const amount = Number.parseFloat(match[1] ?? '')
+  if (!Number.isFinite(amount)) return undefined
+  const unit = (match[2] ?? '').toUpperCase()
+  const multiplier = unit === 'B' ? 1_000_000_000 : unit === 'M' ? 1_000_000 : unit === 'K' ? 1_000 : 1
+  return Math.round(amount * multiplier)
+}
+
+function getPiCatalogCommand(): string {
+  return process.env.PI_ACP_PI_COMMAND?.trim() || 'pi'
+}
+
+function getModelCatalog(): Map<string, ModelCatalogEntry> {
+  const command = getPiCatalogCommand()
+  const cached = modelCatalogCache.get(command)
+  if (cached) return cached
+
+  try {
+    const result = spawnSync(command, ['--list-models'], { encoding: 'utf-8', timeout: 15000 })
+    const lines = String(result.stdout ?? '')
+      .split(/\r?\n/)
+      .map(line => line.trimEnd())
+      .filter(Boolean)
+    const catalog = new Map<string, ModelCatalogEntry>()
+    for (const line of lines.slice(1)) {
+      const [provider, model, context, maxOut, thinking, images] = line
+        .trim()
+        .split(/\s{2,}/)
+        .map(part => part.trim())
+      if (!provider || !model) continue
+      const description = [
+        context ? `${context} context` : null,
+        maxOut ? `${maxOut} max out` : null,
+        thinking === 'yes' ? 'thinking' : null,
+        images === 'yes' ? 'images' : null
+      ]
+        .filter(Boolean)
+        .join(' · ')
+      catalog.set(`${provider}/${model}`, {
+        ...(context ? { contextWindow: parseCompactTokenCount(context) } : {}),
+        ...(description ? { description } : {})
+      })
+    }
+    modelCatalogCache.set(command, catalog)
+    return catalog
+  } catch {
+    return new Map()
+  }
+}
+
 async function getModelState(
   proc: PiRpcProcess,
   pre?: { state?: any | null; availableModels?: any | null }
@@ -1114,6 +1182,7 @@ async function getModelState(
       }
     })())
 
+  const catalog = getModelCatalog()
   const models: any[] = Array.isArray(data?.models) ? data.models : []
   availableModels = models
     .map(m => {
@@ -1122,10 +1191,11 @@ async function getModelState(
       if (!provider || !id) return null
 
       const name = String(m?.name ?? id)
+      const modelId = `${provider}/${id}`
       return {
-        modelId: `${provider}/${id}`,
+        modelId,
         name: `${provider}/${name}`,
-        description: null
+        description: catalog.get(modelId)?.description ?? null
       } satisfies ModelInfo
     })
     .filter(Boolean) as ModelInfo[]
@@ -1158,6 +1228,78 @@ async function getModelState(
   return {
     availableModels,
     currentModelId
+  }
+}
+
+function toConfigOptions(
+  models: { availableModels: ModelInfo[]; currentModelId: string } | null
+): SessionConfigOption[] {
+  if (!models) return []
+  return [
+    {
+      id: 'model',
+      name: 'Model',
+      type: 'select',
+      currentValue: models.currentModelId,
+      options: models.availableModels.map(model => ({
+        value: model.modelId,
+        name: model.name,
+        description: model.description ?? null
+      })),
+      _meta: { category: 'model' }
+    } as SessionConfigOption & { _meta: { category: string } }
+  ]
+}
+
+async function setSessionModel(proc: PiRpcProcess, requestedModelId: string): Promise<void> {
+  let provider: string | null = null
+  let modelId: string | null = null
+
+  if (requestedModelId.includes('/')) {
+    const [p, ...rest] = requestedModelId.split('/')
+    provider = p
+    modelId = rest.join('/')
+  } else {
+    modelId = requestedModelId
+  }
+
+  if (!provider) {
+    const data = (await proc.getAvailableModels()) as any
+    const models: any[] = Array.isArray(data?.models) ? data.models : []
+    const found = models.find(m => String(m?.id) === modelId)
+    if (found) {
+      provider = String(found.provider)
+      modelId = String(found.id)
+    }
+  }
+
+  if (!provider || !modelId) throw RequestError.invalidParams(`Unknown modelId: ${requestedModelId}`)
+  await proc.setModel(provider, modelId)
+}
+
+async function emitUsageUpdate(
+  conn: AgentSideConnection,
+  sessionId: string,
+  proc: PiRpcProcess,
+  models?: { availableModels: ModelInfo[]; currentModelId: string } | null
+): Promise<void> {
+  try {
+    const stats = (await proc.getSessionStats()) as any
+    const used = typeof stats?.tokens?.total === 'number' ? stats.tokens.total : null
+    if (used === null) return
+    const activeModelId = models?.currentModelId ?? (typeof stats?.model === 'string' ? stats.model : null)
+    const size = (activeModelId ? getModelCatalog().get(activeModelId)?.contextWindow : undefined) ?? used
+    await conn.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'usage_update',
+        used,
+        size,
+        ...(typeof stats?.cost === 'number' ? { cost: { amount: stats.cost, currency: 'USD' } } : {})
+      } as any
+    })
+  } catch {
+    // Best-effort only.
   }
 }
 

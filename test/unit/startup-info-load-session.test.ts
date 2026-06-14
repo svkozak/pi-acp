@@ -43,8 +43,8 @@ test('PiAcpAgent: does not emit startup info on loadSession', async () => {
 
     assert.equal((res as any)?._meta?.piAcp?.startupInfo, null)
 
-    // Only available_commands_update should be scheduled.
-    assert.equal(timeouts.length, 1)
+    // usage_update + available_commands_update should be scheduled.
+    assert.equal(timeouts.length, 2)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     PiRpcProcess.spawn = originalSpawn
