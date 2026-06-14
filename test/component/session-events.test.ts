@@ -660,6 +660,7 @@ test('PiAcpSession: steeringPrompt forwards immediately to pi during an active t
 
   assert.equal(proc.prompts.length, 2)
   assert.equal(proc.prompts[1]!.message, 'steer now')
+  assert.equal(proc.prompts[1]!.streamingBehavior, 'steer')
 })
 
 test('PiAcpSession: queues concurrent prompt and starts it after agent_end', async () => {

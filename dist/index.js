@@ -206,8 +206,8 @@ var PiRpcProcess = class _PiRpcProcess {
     const lines = this.preludeLines.splice(0, this.preludeLines.length);
     return lines;
   }
-  async prompt(message, images = []) {
-    const res = await this.request({ type: "prompt", message, images });
+  async prompt(message, images = [], streamingBehavior) {
+    const res = await this.request({ type: "prompt", message, images, ...streamingBehavior ? { streamingBehavior } : {} });
     if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`);
   }
   async abort() {
@@ -728,7 +728,7 @@ var PiAcpSession = class {
     });
   }
   async prompt(message, images = []) {
-    const expandedMessage = expandSlashCommand(message, this.fileCommands);
+    const expandedMessage = this.expandMessage(message);
     const turnPromise = new Promise((resolve4, reject) => {
       const queued = { message: expandedMessage, images, resolve: resolve4, reject };
       if (this.pendingTurn) {
@@ -750,6 +750,13 @@ var PiAcpSession = class {
     });
     return turnPromise;
   }
+  async steeringPrompt(message, images = []) {
+    if (!this.pendingTurn) {
+      throw RequestError2.invalidParams("Cannot send steering prompt without an active turn.");
+    }
+    const expandedMessage = this.expandMessage(message);
+    await this.proc.prompt(expandedMessage, images, "steer");
+  }
   async cancel() {
     this.cancelRequested = true;
     if (this.turnQueue.length) {
@@ -768,6 +775,9 @@ var PiAcpSession = class {
   }
   wasCancelRequested() {
     return this.cancelRequested;
+  }
+  expandMessage(message) {
+    return expandSlashCommand(message, this.fileCommands);
   }
   emit(update) {
     this.lastEmit = this.lastEmit.then(
@@ -1812,6 +1822,18 @@ var PiAcpAgent = class {
   }
   async authenticate(_params) {
     return;
+  }
+  async extMethod(method, params) {
+    if (method === "rookery/steering_prompt") {
+      const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "";
+      const text = typeof params?.text === "string" ? params.text.trim() : "";
+      if (!sessionId) throw RequestError3.invalidParams("Missing sessionId.");
+      if (!text) throw RequestError3.invalidParams("Missing steering prompt text.");
+      const session = this.sessions.get(sessionId);
+      await session.steeringPrompt(text);
+      return { accepted: true };
+    }
+    throw RequestError3.methodNotFound(`_${method}`);
   }
   async prompt(params) {
     const session = this.sessions.get(params.sessionId);

@@ -26,7 +26,7 @@ export class FakePiRpcProcess {
   private handlers: Array<(ev: PiRpcEvent) => void> = []
 
   // spies
-  readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
+  readonly prompts: Array<{ message: string; attachments: unknown[]; streamingBehavior?: 'steer' | 'followUp' }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
   setModelCalls: Array<{ provider: string; modelId: string }> = []
@@ -42,8 +42,8 @@ export class FakePiRpcProcess {
     for (const h of this.handlers) h(ev)
   }
 
-  async prompt(message: string, attachments: unknown[] = []): Promise<void> {
-    this.prompts.push({ message, attachments })
+  async prompt(message: string, attachments: unknown[] = [], streamingBehavior?: 'steer' | 'followUp'): Promise<void> {
+    this.prompts.push({ message, attachments, streamingBehavior })
   }
 
   async abort(): Promise<void> {

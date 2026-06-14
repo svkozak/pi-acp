@@ -301,7 +301,7 @@ export class PiAcpSession {
     }
 
     const expandedMessage = this.expandMessage(message)
-    await this.proc.prompt(expandedMessage, images)
+    await this.proc.prompt(expandedMessage, images, 'steer')
   }
 
   async cancel(): Promise<void> {
