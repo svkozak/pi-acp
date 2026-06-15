@@ -895,7 +895,7 @@ export class PiAcpAgent implements ACPAgent {
     await session.cancel()
   }
 
-  async unstable_listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
+  async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
     // ACP: filter by cwd if provided.
     // Zed currently sends `{}` (no cwd), so we default to the last session cwd to
     // emulate pi's `/resume` picker (project-scoped).
@@ -1115,7 +1115,8 @@ export class PiAcpAgent implements ACPAgent {
   async extMethod(method: string, params: Record<string, unknown>): Promise<unknown> {
     if (method === 'session/status') {
       const sessionId = typeof params.sessionId === 'string' ? params.sessionId : null
-      if (!sessionId) throw RequestError.invalidParams(`sessionId is required (got params: ${JSON.stringify(params).slice(0, 200)})`)
+      if (!sessionId)
+        throw RequestError.invalidParams(`sessionId is required (got params: ${JSON.stringify(params).slice(0, 200)})`)
 
       const session = this.sessions.get(sessionId)
       const state = (await session.proc.getState()) as any
@@ -1134,23 +1135,31 @@ export class PiAcpAgent implements ACPAgent {
       const thinkingLevel = typeof state?.thinkingLevel === 'string' ? state.thinkingLevel : null
 
       // Extract token usage
-      const tokens = stats?.tokens && typeof stats.tokens === 'object' ? {
-        input: typeof stats.tokens.input === 'number' ? stats.tokens.input : 0,
-        output: typeof stats.tokens.output === 'number' ? stats.tokens.output : 0,
-        cacheRead: typeof stats.tokens.cacheRead === 'number' ? stats.tokens.cacheRead : 0,
-        cacheWrite: typeof stats.tokens.cacheWrite === 'number' ? stats.tokens.cacheWrite : 0,
-        total: typeof stats.tokens.total === 'number' ? stats.tokens.total : 0,
-      } : null
+      const tokens =
+        stats?.tokens && typeof stats.tokens === 'object'
+          ? {
+              input: typeof stats.tokens.input === 'number' ? stats.tokens.input : 0,
+              output: typeof stats.tokens.output === 'number' ? stats.tokens.output : 0,
+              cacheRead: typeof stats.tokens.cacheRead === 'number' ? stats.tokens.cacheRead : 0,
+              cacheWrite: typeof stats.tokens.cacheWrite === 'number' ? stats.tokens.cacheWrite : 0,
+              total: typeof stats.tokens.total === 'number' ? stats.tokens.total : 0
+            }
+          : null
 
       return {
         sessionId,
         model: currentModel,
         thinkingLevel,
-        messageCount: typeof stats?.totalMessages === 'number' ? stats.totalMessages : (typeof state?.messageCount === 'number' ? state.messageCount : null),
+        messageCount:
+          typeof stats?.totalMessages === 'number'
+            ? stats.totalMessages
+            : typeof state?.messageCount === 'number'
+              ? state.messageCount
+              : null,
         cost: typeof stats?.cost === 'number' ? stats.cost : null,
         tokens,
         contextUsage: stats?.contextUsage ?? null,
-        sessionFile: typeof state?.sessionFile === 'string' ? state.sessionFile : null,
+        sessionFile: typeof state?.sessionFile === 'string' ? state.sessionFile : null
       }
     }
 
