@@ -1115,7 +1115,7 @@ export class PiAcpAgent implements ACPAgent {
   async extMethod(method: string, params: Record<string, unknown>): Promise<unknown> {
     if (method === 'session/status') {
       const sessionId = typeof params.sessionId === 'string' ? params.sessionId : null
-      if (!sessionId) throw RequestError.invalidParams('sessionId is required')
+      if (!sessionId) throw RequestError.invalidParams(`sessionId is required (got params: ${JSON.stringify(params).slice(0, 200)})`)
 
       const session = this.sessions.get(sessionId)
       const state = (await session.proc.getState()) as any
