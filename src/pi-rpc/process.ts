@@ -82,6 +82,8 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private readonly lastStderrLines: string[] = []
+  private exitInfo: { code: number | null; signal: string | null } | null = null
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
@@ -116,6 +118,7 @@ export class PiRpcProcess {
     })
 
     child.on('exit', (code, signal) => {
+      this.exitInfo = { code, signal }
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
@@ -124,6 +127,15 @@ export class PiRpcProcess {
     child.on('error', err => {
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
+    })
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      const text = chunk.toString().trim()
+      if (text) {
+        this.lastStderrLines.push(text)
+        // Keep only last 10 lines
+        if (this.lastStderrLines.length > 10) this.lastStderrLines.shift()
+      }
     })
   }
 
@@ -180,10 +192,6 @@ export class PiRpcProcess {
 
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
-
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
-    })
 
     const proc = new PiRpcProcess(child)
 
@@ -350,15 +358,36 @@ export class PiRpcProcess {
       try {
         this.child.stdin.write(line, error => {
           if (error) {
-            reject(error)
+            reject(new Error(this.buildWriteErrorMessage(error)))
             return
           }
 
           resolve()
         })
       } catch (error: unknown) {
-        reject(error)
+        reject(new Error(this.buildWriteErrorMessage(error)))
       }
     })
+  }
+
+  private buildWriteErrorMessage(originalError: unknown): string {
+    const parts: string[] = []
+
+    if (this.exitInfo) {
+      parts.push(`pi process exited (code=${this.exitInfo.code}, signal=${this.exitInfo.signal})`)
+    } else {
+      parts.push('pi process is unavailable')
+    }
+
+    if (this.lastStderrLines.length > 0) {
+      parts.push(`Last stderr: ${this.lastStderrLines.slice(-3).join(' | ')}`)
+    }
+
+    if (!parts.length) {
+      const msg = originalError instanceof Error ? originalError.message : String(originalError)
+      return `Failed to communicate with pi: ${msg}`
+    }
+
+    return parts.join('. ')
   }
 }
