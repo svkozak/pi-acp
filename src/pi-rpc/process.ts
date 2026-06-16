@@ -61,6 +61,11 @@ type PiRpcResponse = {
   error?: string
 }
 
+type PiExtensionUiResponse =
+  | { id: string; value: string }
+  | { id: string; confirmed: boolean }
+  | { id: string; cancelled: true }
+
 export type PiRpcEvent = Record<string, unknown>
 
 type SpawnParams = {
@@ -163,7 +168,7 @@ export class PiRpcProcess {
       const code = typeof e?.code === 'string' ? e.code : undefined
       if (code === 'ENOENT') {
         throw new PiRpcSpawnError(
-          `Could not start pi: executable not found (command: ${cmd}). Pi needs to be installed before it can run in ACP clients. Install it via \`npm install -g @mariozechner/pi-coding-agent\` or ensure \`pi\` is on your PATH. Then try again.`,
+          `Could not start pi: executable not found (command: ${cmd}). Pi needs to be installed before it can run in ACP clients. Install it via \`npm install -g @earendil-works/pi-coding-agent\` or ensure \`pi\` is on your PATH. Then try again.`,
           { code, cause: e }
         )
       }
@@ -314,25 +319,39 @@ export class PiRpcProcess {
     return res.data
   }
 
+  async sendExtensionUiResponse(response: PiExtensionUiResponse): Promise<void> {
+    await this.writeLine(`${JSON.stringify({ type: 'extension_ui_response', ...response })}\n`)
+  }
+
   private request(cmd: PiRpcCommand): Promise<PiRpcResponse> {
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
 
-    const line = JSON.stringify(withId) + '\n'
+    const line = `${JSON.stringify(withId)}\n`
 
     return new Promise<PiRpcResponse>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
 
-      try {
-        this.child.stdin.write(line, err => {
-          if (err) {
-            this.pending.delete(id)
-            reject(err)
-          }
-        })
-      } catch (e) {
+      void this.writeLine(line).catch(error => {
         this.pending.delete(id)
-        reject(e)
+        reject(error)
+      })
+    })
+  }
+
+  private writeLine(line: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      try {
+        this.child.stdin.write(line, error => {
+          if (error) {
+            reject(error)
+            return
+          }
+
+          resolve()
+        })
+      } catch (error: unknown) {
+        reject(error)
       }
     })
   }

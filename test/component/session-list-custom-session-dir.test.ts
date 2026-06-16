@@ -11,13 +11,29 @@ test('listPiSessions: respects sessionDir from pi settings.json', async () => {
   const customSessionsDir = join(root, 'somewhere-else', '--p--')
   mkdirSync(customSessionsDir, { recursive: true })
 
-  writeFileSync(join(root, 'settings.json'), JSON.stringify({ sessionDir: join(root, 'somewhere-else') }, null, 2), 'utf8')
+  writeFileSync(
+    join(root, 'settings.json'),
+    JSON.stringify({ sessionDir: join(root, 'somewhere-else') }, null, 2),
+    'utf8'
+  )
 
   writeFileSync(
     join(customSessionsDir, 's.jsonl'),
     [
-      JSON.stringify({ type: 'session', version: 3, id: 'sess-custom', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/tmp/project' }),
-      JSON.stringify({ type: 'message', id: 'm1', parentId: null, timestamp: '2026-01-01T00:00:01.000Z', message: { role: 'user', content: 'hi' } })
+      JSON.stringify({
+        type: 'session',
+        version: 3,
+        id: 'sess-custom',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        cwd: '/tmp/project'
+      }),
+      JSON.stringify({
+        type: 'message',
+        id: 'm1',
+        parentId: null,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        message: { role: 'user', content: 'hi' }
+      })
     ].join('\n') + '\n',
     { encoding: 'utf8' }
   )

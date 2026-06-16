@@ -1,6 +1,6 @@
 # pi-acp (ACP adapter for pi-coding-agent)
 
-This repository implements an **Agent Client Protocol (ACP)** adapter for **pi** (`@mariozechner/pi-coding-agent`) without modifying pi.
+This repository implements an **Agent Client Protocol (ACP)** adapter for **pi** (`@earendil-works/pi-coding-agent`) without modifying pi.
 
 - ACP side: **JSON-RPC 2.0 over stdio** using `@agentclientprotocol/sdk` (TypeScript)
 - Pi side: spawn `pi --mode rpc` and communicate via **newline-delimited JSON** over stdio
@@ -59,6 +59,11 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 - Be strict about streaming and process cleanup (handle exit, drain stdout/stderr, timeouts).
 - Avoid producing unnecessary comments! Use comments sparingly to explain non-obvious decisions, not to narrate code.
 - Avoid using `any` in TypeScript; prefer explicit types and interfaces. Only use `any` when absolutely necessary (e.g. for untyped external data).
+
+## Validation
+
+- After making code edits, run formatting before finishing the task. Use `npm run format` when it is safe to format the whole worktree; otherwise use the narrowest safe formatter command for the files you touched.
+- If formatting is skipped or fails, say so explicitly in the final response.
 
 ## Source control
 

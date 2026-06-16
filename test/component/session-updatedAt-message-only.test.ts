@@ -18,9 +18,27 @@ test('listPiSessions: updatedAt prefers last message timestamp over later non-me
   writeFileSync(
     sessionFile,
     [
-      JSON.stringify({ type: 'session', version: 3, id: 'sess-1', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/tmp/project' }),
-      JSON.stringify({ type: 'message', id: 'a1b2c3d4', parentId: null, timestamp: '2026-01-01T00:00:02.000Z', message: { role: 'user', content: 'hi' } }),
-      JSON.stringify({ type: 'session_info', id: 'b1b2c3d4', parentId: 'a1b2c3d4', timestamp: '2026-01-01T00:00:10.000Z', name: 'named' })
+      JSON.stringify({
+        type: 'session',
+        version: 3,
+        id: 'sess-1',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        cwd: '/tmp/project'
+      }),
+      JSON.stringify({
+        type: 'message',
+        id: 'a1b2c3d4',
+        parentId: null,
+        timestamp: '2026-01-01T00:00:02.000Z',
+        message: { role: 'user', content: 'hi' }
+      }),
+      JSON.stringify({
+        type: 'session_info',
+        id: 'b1b2c3d4',
+        parentId: 'a1b2c3d4',
+        timestamp: '2026-01-01T00:00:10.000Z',
+        name: 'named'
+      })
     ].join('\n') + '\n',
     { encoding: 'utf8' }
   )

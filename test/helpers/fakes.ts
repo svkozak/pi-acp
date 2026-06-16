@@ -5,9 +5,20 @@ type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
 export class FakeAgentSideConnection {
   readonly updates: SessionUpdateMsg[] = []
+  readonly permissionRequests: unknown[] = []
+  nextPermissionResponse: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } = {
+    outcome: { outcome: 'selected', optionId: 'allow' }
+  }
 
   async sessionUpdate(msg: SessionUpdateMsg): Promise<void> {
     this.updates.push(msg)
+  }
+
+  async requestPermission(
+    params: unknown
+  ): Promise<{ outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }> {
+    this.permissionRequests.push(params)
+    return this.nextPermissionResponse
   }
 }
 
@@ -16,6 +27,7 @@ export class FakePiRpcProcess {
 
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
+  readonly extensionUiResponses: unknown[] = []
   abortCount = 0
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
@@ -37,6 +49,9 @@ export class FakePiRpcProcess {
     this.abortCount += 1
   }
 
+  async sendExtensionUiResponse(response: unknown): Promise<void> {
+    this.extensionUiResponses.push(response)
+  }
 
   async getState(): Promise<any> {
     return {}

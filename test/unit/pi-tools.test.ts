@@ -13,7 +13,10 @@ test('toolResultToText: extracts text from content blocks', () => {
 })
 
 test('toolResultToText: prefers details.diff when present', () => {
-  const text = toolResultToText({ details: { diff: '--- a\n+++ b\n' } })
+  const text = toolResultToText({
+    content: [{ type: 'text', text: 'Successfully replaced 2 block(s) in a.txt.' }],
+    details: { diff: '--- a\n+++ b\n' }
+  })
   assert.equal(text, '--- a\n+++ b\n')
 })
 

@@ -30,7 +30,11 @@ export function toAvailableCommandsFromPiGetCommands(
   const includeExtensionCommands = opts?.includeExtensionCommands ?? false
 
   const root: any = data
-  const commandsRaw: PiRpcCommandInfo[] = Array.isArray(root?.commands) ? root.commands : Array.isArray(root?.data?.commands) ? root.data.commands : []
+  const commandsRaw: PiRpcCommandInfo[] = Array.isArray(root?.commands)
+    ? root.commands
+    : Array.isArray(root?.data?.commands)
+      ? root.data.commands
+      : []
 
   const out: AvailableCommand[] = []
 

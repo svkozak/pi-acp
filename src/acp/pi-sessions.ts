@@ -323,8 +323,11 @@ export function listPiSessions(): PiSessionListItem[] {
   return items
 }
 
-export function findPiSessionFile(sessionId: string): string | null {
+export function findPiSession(sessionId: string): PiSessionListItem | null {
   const all = listPiSessions()
-  const found = all.find(s => s.sessionId === sessionId)
-  return found?.sessionFile ?? null
+  return all.find(s => s.sessionId === sessionId) ?? null
+}
+
+export function findPiSessionFile(sessionId: string): string | null {
+  return findPiSession(sessionId)?.sessionFile ?? null
 }

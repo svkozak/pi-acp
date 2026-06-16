@@ -5,6 +5,9 @@ import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpe
 
 class FakeSessions {
   constructor(private readonly session: any) {}
+  maybeGet(_id: string) {
+    return this.session
+  }
   get(_id: string) {
     return this.session
   }

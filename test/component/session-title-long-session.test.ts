@@ -15,11 +15,29 @@ test('listPiSessions: finds session_info.name even when it is outside the tail w
 
   const sessionFile = join(sessionsDir, 's.jsonl')
 
-  const header = JSON.stringify({ type: 'session', version: 3, id: 'sess-1', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/tmp/project' })
-  const info = JSON.stringify({ type: 'session_info', id: 'i1', parentId: null, timestamp: '2026-01-01T00:00:01.000Z', name: 'Named Early' })
+  const header = JSON.stringify({
+    type: 'session',
+    version: 3,
+    id: 'sess-1',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    cwd: '/tmp/project'
+  })
+  const info = JSON.stringify({
+    type: 'session_info',
+    id: 'i1',
+    parentId: null,
+    timestamp: '2026-01-01T00:00:01.000Z',
+    name: 'Named Early'
+  })
 
   // Create a large filler so the name is far outside the last 256KB tail.
-  const fillerLine = JSON.stringify({ type: 'message', id: 'm', parentId: null, timestamp: '2026-01-01T00:00:02.000Z', message: { role: 'user', content: 'x'.repeat(2000) } })
+  const fillerLine = JSON.stringify({
+    type: 'message',
+    id: 'm',
+    parentId: null,
+    timestamp: '2026-01-01T00:00:02.000Z',
+    message: { role: 'user', content: 'x'.repeat(2000) }
+  })
   const filler = Array.from({ length: 400 }, () => fillerLine).join('\n')
 
   writeFileSync(sessionFile, [header, info, filler].join('\n') + '\n', { encoding: 'utf8' })

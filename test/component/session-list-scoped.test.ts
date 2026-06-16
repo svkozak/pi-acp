@@ -17,18 +17,42 @@ test('PiAcpAgent: unstable_listSessions defaults to lastSessionCwd when cwd para
 
   writeFileSync(
     join(dirA, '1.jsonl'),
-    JSON.stringify({ type: 'session', version: 3, id: 'sess-a', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/cwd/a' }) +
+    JSON.stringify({
+      type: 'session',
+      version: 3,
+      id: 'sess-a',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      cwd: '/cwd/a'
+    }) +
       '\n' +
-      JSON.stringify({ type: 'session_info', id: 'a1b2c3d4', parentId: null, timestamp: '2026-01-01T00:00:01.000Z', name: 'A' }) +
+      JSON.stringify({
+        type: 'session_info',
+        id: 'a1b2c3d4',
+        parentId: null,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        name: 'A'
+      }) +
       '\n',
     { encoding: 'utf8' }
   )
 
   writeFileSync(
     join(dirB, '2.jsonl'),
-    JSON.stringify({ type: 'session', version: 3, id: 'sess-b', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/cwd/b' }) +
+    JSON.stringify({
+      type: 'session',
+      version: 3,
+      id: 'sess-b',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      cwd: '/cwd/b'
+    }) +
       '\n' +
-      JSON.stringify({ type: 'session_info', id: 'b1b2c3d4', parentId: null, timestamp: '2026-01-01T00:00:01.000Z', name: 'B' }) +
+      JSON.stringify({
+        type: 'session_info',
+        id: 'b1b2c3d4',
+        parentId: null,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        name: 'B'
+      }) +
       '\n',
     { encoding: 'utf8' }
   )

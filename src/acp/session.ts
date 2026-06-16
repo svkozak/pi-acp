@@ -2,18 +2,19 @@ import type {
   AgentSideConnection,
   ContentBlock,
   McpServer,
+  PermissionOption,
   SessionUpdate,
   ToolCallContent,
   ToolCallLocation,
   ToolKind
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
-import { maybeAuthRequiredError } from './auth-required.js'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
+import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
   bashExitCode,
@@ -25,7 +26,7 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
+import { toolResultToText } from './translate/pi-tools.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -49,6 +50,15 @@ type QueuedTurn = {
   reject: (err: unknown) => void
 }
 
+type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
+
+const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
+  { optionId: 'yes', name: 'Yes', kind: 'allow_once' },
+  { optionId: 'no', name: 'No', kind: 'reject_once' }
+]
+const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
+const CHOICE_OPTION_PREFIX = 'choice-'
+
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
 
@@ -65,8 +75,72 @@ function findUniqueLineNumber(text: string, needle: string): number | undefined 
   return line
 }
 
+function getToolPath(args: unknown): string | undefined {
+  const record = args as { path?: unknown; file_path?: unknown } | null | undefined
+  if (typeof record?.path === 'string') return record.path
+  if (typeof record?.file_path === 'string') return record.file_path
+  return undefined
+}
+
+// Match pi's current edit schema: { path, edits: [{ oldText, newText }] }, with
+// legacy top-level oldText/newText still accepted. Pi also normalizes stringified edits.
+// https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/tools/edit.ts
+function getParsedEdits(args: unknown): Array<{ oldText: string; newText: string }> {
+  const record = args as { oldText?: unknown; newText?: unknown; edits?: unknown } | null | undefined
+  const parsed: Array<{ oldText: string; newText: string }> = []
+
+  if (typeof record?.oldText === 'string' && typeof record?.newText === 'string') {
+    parsed.push({ oldText: record.oldText, newText: record.newText })
+  }
+
+  let edits = record?.edits
+  if (typeof edits === 'string') {
+    try {
+      edits = JSON.parse(edits) as unknown
+    } catch {
+      edits = undefined
+    }
+  }
+
+  if (Array.isArray(edits)) {
+    for (const edit of edits) {
+      const item = edit as { oldText?: unknown; newText?: unknown } | null | undefined
+      if (typeof item?.oldText === 'string' && typeof item?.newText === 'string') {
+        parsed.push({ oldText: item.oldText, newText: item.newText })
+      }
+    }
+  }
+
+  return parsed
+}
+
+function getEditOldTexts(args: unknown): string[] {
+  const record = args as { oldText?: unknown; edits?: unknown } | null | undefined
+  const oldTexts = getParsedEdits(args).map(edit => edit.oldText)
+
+  if (typeof record?.oldText === 'string' && !oldTexts.includes(record.oldText)) oldTexts.push(record.oldText)
+
+  let edits = record?.edits
+  if (typeof edits === 'string') {
+    try {
+      edits = JSON.parse(edits) as unknown
+    } catch {
+      edits = undefined
+    }
+  }
+
+  if (Array.isArray(edits)) {
+    for (const edit of edits) {
+      const oldText = (edit as { oldText?: unknown } | null | undefined)?.oldText
+      if (typeof oldText === 'string' && !oldTexts.includes(oldText)) oldTexts.push(oldText)
+    }
+  }
+
+  return oldTexts
+}
+
 function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
-  const path = typeof (args as { path?: unknown } | null | undefined)?.path === 'string' ? (args as { path: string }).path : undefined
+  const path = getToolPath(args)
   if (!path) return undefined
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
@@ -209,10 +283,11 @@ export class PiAcpSession {
   // The overall agent loop completes when `agent_end` is emitted.
   private inAgentLoop = false
 
-  // For ACP diff support: capture file contents before edits, then emit ToolCallContent {type:"diff"}.
-  // This is due to pi sending diff as a string as opposed to ACP expected diff format.
-  // Compatible format may need to be implemented in pi in the future.
-  private editSnapshots = new Map<string, { path: string; oldText: string }>()
+  // For ACP diff support: capture file contents before edit/write mutations,
+  // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
+  // events may need to be implemented in pi in the future.
+  private fileSnapshots = new Map<string, { path: string; oldText: string | null }>()
+  private fileMutationToolCallIds = new Set<string>()
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
 
@@ -240,6 +315,7 @@ export class PiAcpSession {
 
   setStartupInfo(text: string) {
     this.startupInfo = text
+    this.startupInfoSent = false
   }
 
   /**
@@ -258,7 +334,6 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
-
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
@@ -389,7 +464,8 @@ export class PiAcpSession {
 
   private cleanupToolCall(toolCallId: string): void {
     this.currentToolCalls.delete(toolCallId)
-    this.editSnapshots.delete(toolCallId)
+    this.fileSnapshots.delete(toolCallId)
+    this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
   }
@@ -542,9 +618,7 @@ export class PiAcpSession {
         if (isBashTool(toolName)) {
           const locations = toToolCallLocations(args, this.cwd)
           const existingStatus = this.currentToolCalls.get(toolCallId)
-          if (!existingStatus) this.currentToolCalls.set(toolCallId, 'in_progress')
-          else this.currentToolCalls.set(toolCallId, 'in_progress')
-
+          this.currentToolCalls.set(toolCallId, 'in_progress')
           this.emitBashToolCall({
             sessionUpdate: existingStatus ? 'tool_call_update' : 'tool_call',
             toolCallId,
@@ -557,19 +631,27 @@ export class PiAcpSession {
           break
         }
 
-        // Capture pre-edit file contents so we can emit a structured ACP diff on completion.
-        if (toolName === 'edit') {
-          const p = typeof args?.path === 'string' ? args.path : undefined
+        // Capture pre-mutation file contents so we can emit a structured ACP diff.
+        const isFileMutation = toolName === 'edit' || toolName === 'write'
+        let snapshotOldText: string | null | undefined
+        if (isFileMutation) {
+          this.fileMutationToolCallIds.add(toolCallId)
+          const p = getToolPath(args)
           if (p) {
             try {
               const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
-              const oldText = readFileSync(abs, 'utf8')
-              this.editSnapshots.set(toolCallId, { path: p, oldText })
+              snapshotOldText = readFileSync(abs, 'utf8')
+              this.fileSnapshots.set(toolCallId, { path: p, oldText: snapshotOldText })
 
-              const needle = typeof args?.oldText === 'string' ? args.oldText : ''
-              line = findUniqueLineNumber(oldText, needle)
+              if (toolName === 'edit') {
+                for (const needle of getEditOldTexts(args)) {
+                  line = findUniqueLineNumber(snapshotOldText, needle)
+                  if (typeof line === 'number') break
+                }
+              }
             } catch {
-              // Ignore snapshot failures; we'll fall back to plain text output.
+              snapshotOldText = null
+              this.fileSnapshots.set(toolCallId, { path: p, oldText: null })
             }
           }
         }
@@ -612,7 +694,8 @@ export class PiAcpSession {
           break
         }
 
-        const text = toolResultToText(partial)
+        const text = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
+
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
@@ -620,7 +703,7 @@ export class PiAcpSession {
           content: text
             ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
             : undefined,
-          rawOutput: partial
+          ...(this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: partial })
         })
         break
       }
@@ -644,24 +727,23 @@ export class PiAcpSession {
 
         const text = toolResultToText(result)
 
-        // If this was an edit and we captured a snapshot, emit a structured ACP diff.
-        // This enables clients like Zed to render an actual diff UI.
-        const snapshot = this.editSnapshots.get(toolCallId)
+        const snapshot = this.fileSnapshots.get(toolCallId)
         let content: ToolCallContent[] | undefined
+        let hasStructuredDiff = false
 
         if (!isError && snapshot) {
           try {
             const abs = isAbsolute(snapshot.path) ? snapshot.path : resolvePath(this.cwd, snapshot.path)
             const newText = readFileSync(abs, 'utf8')
-            if (newText !== snapshot.oldText) {
+            if (snapshot.oldText === null || newText !== snapshot.oldText) {
+              hasStructuredDiff = true
               content = [
                 {
                   type: 'diff',
                   path: snapshot.path,
                   oldText: snapshot.oldText,
                   newText
-                },
-                ...(text ? ([{ type: 'content', content: { type: 'text', text } }] as ToolCallContent[]) : [])
+                }
               ]
             }
           } catch {
@@ -669,8 +751,7 @@ export class PiAcpSession {
           }
         }
 
-        // Fallback: just text content.
-        if (!content && text) {
+        if (!content && !hasStructuredDiff && text) {
           content = [{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[]
         }
 
@@ -679,10 +760,22 @@ export class PiAcpSession {
           toolCallId,
           status: isError ? 'failed' : 'completed',
           content,
-          rawOutput: result
+          ...(hasStructuredDiff ? {} : { rawOutput: result })
         })
 
         this.cleanupToolCall(toolCallId)
+        break
+      }
+
+      case 'extension_ui_request': {
+        void this.handleExtensionUiRequest(ev).catch(() => {
+          const id = stringProp(ev, 'id')
+          if (!id) {
+            return
+          }
+
+          void this.proc.sendExtensionUiResponse({ id, cancelled: true }).catch(() => {})
+        })
         break
       }
 
@@ -705,7 +798,10 @@ export class PiAcpSession {
       case 'auto_compaction_start': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Context nearing limit, running automatic compaction...' } satisfies ContentBlock
+          content: {
+            type: 'text',
+            text: 'Context nearing limit, running automatic compaction...'
+          } satisfies ContentBlock
         })
         break
       }
@@ -763,6 +859,140 @@ export class PiAcpSession {
         break
     }
   }
+
+  private async handleExtensionUiRequest(ev: PiRpcEvent): Promise<void> {
+    const id = stringProp(ev, 'id')
+    const method = stringProp(ev, 'method')
+    if (!id) {
+      return
+    }
+
+    if (method === 'select') {
+      await this.handleExtensionSelect(ev, id)
+      return
+    }
+
+    if (method === 'confirm') {
+      await this.handleExtensionConfirm(ev, id)
+      return
+    }
+
+    if (method === 'input' || method === 'editor') {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: `Pi ${method} UI request is not supported in ACP yet; cancelling it.`
+        } satisfies ContentBlock
+      })
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    if (method === 'notify') {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock
+      })
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+  }
+
+  private async handleExtensionSelect(ev: PiRpcEvent, id: string): Promise<void> {
+    const rawOptions = ev.options
+    const options = Array.isArray(rawOptions) ? rawOptions.map(option => String(option)) : []
+    if (!options.length) {
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    const permissionOptions: PermissionOption[] = options.map((name, index) => ({
+      optionId: `${CHOICE_OPTION_PREFIX}${index}`,
+      name,
+      kind: 'allow_once'
+    }))
+
+    const selected = await this.requestExtensionPermission(id, ev, permissionOptions)
+    if (selected === null) {
+      return
+    }
+
+    const selectedOptionId = selected.outcome.outcome === 'selected' ? selected.outcome.optionId : null
+    const index = selectedOptionId === null ? null : optionIndex(selectedOptionId)
+    const value = index === null ? null : (options.at(index) ?? null)
+    await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value })
+  }
+
+  private async handleExtensionConfirm(ev: PiRpcEvent, id: string): Promise<void> {
+    const selected = await this.requestExtensionPermission(id, ev, CONFIRM_PERMISSION_OPTIONS)
+    if (selected === null) {
+      return
+    }
+
+    if (selected.outcome.outcome === 'cancelled') {
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    await this.proc.sendExtensionUiResponse({ id, confirmed: selected.outcome.optionId === 'yes' })
+  }
+
+  private async requestExtensionPermission(
+    id: string,
+    ev: PiRpcEvent,
+    options: PermissionOption[]
+  ): Promise<PermissionResponse | null> {
+    try {
+      return await this.conn.requestPermission({
+        sessionId: this.sessionId,
+        toolCall: extensionUiToolCall(id, ev),
+        options
+      })
+    } catch {
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return null
+    }
+  }
+}
+
+function extensionUiToolCall(id: string, ev: PiRpcEvent) {
+  const method = stringProp(ev, 'method') ?? 'ui'
+  const title = stringProp(ev, 'title') ?? `Pi ${method}`
+  const rawInput: Record<string, unknown> = { method }
+
+  for (const key of EXTENSION_UI_RAW_INPUT_KEYS) {
+    if (Object.hasOwn(ev, key)) rawInput[key] = ev[key]
+  }
+
+  return {
+    toolCallId: `pi-ui-${id}`,
+    title,
+    kind: 'other' as const,
+    status: 'pending' as const,
+    rawInput
+  }
+}
+
+function stringProp(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key]
+  return typeof value === 'string' ? value : null
+}
+
+function optionIndex(optionId: string): number | null {
+  if (!optionId.startsWith(CHOICE_OPTION_PREFIX)) {
+    return null
+  }
+
+  const rawIndex = optionId.slice(CHOICE_OPTION_PREFIX.length)
+  if (!rawIndex) {
+    return null
+  }
+
+  const index = Number(rawIndex)
+  return Number.isSafeInteger(index) && index >= 0 && String(index) === rawIndex ? index : null
 }
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {
