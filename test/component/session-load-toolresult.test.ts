@@ -23,6 +23,7 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
             role: 'toolResult',
             toolCallId: 'call_1',
             toolName: 'bash',
+            args: { command: 'echo hello' },
             content: [{ type: 'text', text: 'hello from bash' }],
             isError: false
           }
@@ -45,13 +46,21 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
     const toolCall = updates.find(u => u?.sessionUpdate === 'tool_call')
     assert.ok(toolCall)
     assert.equal(toolCall.toolCallId, 'call_1')
-    assert.equal(toolCall.title, 'bash')
+    assert.equal(toolCall.title, 'echo hello')
+    assert.equal(toolCall.kind, 'execute')
+    assert.deepEqual(toolCall.content, [{ type: 'terminal', terminalId: 'call_1' }])
+    assert.deepEqual(toolCall._meta, { terminal_info: { terminal_id: 'call_1', cwd: '/tmp/project' } })
+    assert.equal(toolCall.rawOutput, undefined)
 
     const toolCallUpdate = updates.find(u => u?.sessionUpdate === 'tool_call_update')
     assert.ok(toolCallUpdate)
     assert.equal(toolCallUpdate.toolCallId, 'call_1')
     assert.equal(toolCallUpdate.status, 'completed')
-    assert.equal(toolCallUpdate.content?.[0]?.content?.text, 'hello from bash')
+    assert.deepEqual(toolCallUpdate._meta, {
+      terminal_output: { terminal_id: 'call_1', data: 'hello from bash' },
+      terminal_exit: { terminal_id: 'call_1', exit_code: 0, signal: null }
+    })
+    assert.equal(toolCallUpdate.rawOutput, undefined)
   } finally {
     PiRpcProcess.spawn = originalSpawn
   }

@@ -15,6 +15,17 @@ import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/proces
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
+import {
+  bashCommand,
+  bashExitCode,
+  bashOutputDelta,
+  bashResultText,
+  bashTerminalContent,
+  bashTerminalExitMeta,
+  bashTerminalInfoMeta,
+  bashTerminalOutputMeta,
+  isBashTool
+} from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
 
 type SessionCreateParams = {
@@ -277,6 +288,8 @@ export class PiAcpSession {
   // events may need to be implemented in pi in the future.
   private fileSnapshots = new Map<string, { path: string; oldText: string | null }>()
   private fileMutationToolCallIds = new Set<string>()
+  private bashToolCallIds = new Set<string>()
+  private bashOutputSnapshots = new Map<string, string>()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -403,6 +416,60 @@ export class PiAcpSession {
     await this.lastEmit
   }
 
+  private emitBashToolCall(params: {
+    sessionUpdate: 'tool_call' | 'tool_call_update'
+    toolCallId: string
+    toolName: string
+    args: unknown
+    status: 'pending' | 'in_progress'
+    locations?: ToolCallLocation[]
+    includeTerminal: boolean
+  }): void {
+    this.bashToolCallIds.add(params.toolCallId)
+    this.emit({
+      sessionUpdate: params.sessionUpdate,
+      toolCallId: params.toolCallId,
+      title: bashCommand(params.args) ?? params.toolName,
+      kind: 'execute',
+      status: params.status,
+      locations: params.locations,
+      ...(params.includeTerminal ? { content: bashTerminalContent(params.toolCallId) } : {}),
+      ...(params.includeTerminal ? { _meta: bashTerminalInfoMeta(params.toolCallId, this.cwd) } : {})
+    })
+  }
+
+  private emitBashOutputUpdate(params: {
+    toolCallId: string
+    status: 'in_progress' | 'completed' | 'failed'
+    result: unknown
+    isError?: boolean
+  }): void {
+    const text = bashResultText(params.result)
+    const previous = this.bashOutputSnapshots.get(params.toolCallId) ?? ''
+    const delta = bashOutputDelta(previous, text)
+    this.bashOutputSnapshots.set(params.toolCallId, text)
+
+    this.emit({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: params.toolCallId,
+      status: params.status,
+      _meta: {
+        ...(delta ? bashTerminalOutputMeta(params.toolCallId, delta) : {}),
+        ...(params.status === 'completed' || params.status === 'failed'
+          ? bashTerminalExitMeta(params.toolCallId, bashExitCode(params.result, Boolean(params.isError)))
+          : {})
+      }
+    })
+  }
+
+  private cleanupToolCall(toolCallId: string): void {
+    this.currentToolCalls.delete(toolCallId)
+    this.fileSnapshots.delete(toolCallId)
+    this.fileMutationToolCallIds.delete(toolCallId)
+    this.bashToolCallIds.delete(toolCallId)
+    this.bashOutputSnapshots.delete(toolCallId)
+  }
+
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
@@ -500,7 +567,18 @@ export class PiAcpSession {
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
             const status = existingStatus ?? 'pending'
 
-            if (!existingStatus) {
+            if (isBashTool(toolName)) {
+              if (!existingStatus) this.currentToolCalls.set(toolCallId, 'pending')
+              this.emitBashToolCall({
+                sessionUpdate: existingStatus ? 'tool_call_update' : 'tool_call',
+                toolCallId,
+                toolName,
+                args: rawInput,
+                status,
+                locations,
+                includeTerminal: !existingStatus
+              })
+            } else if (!existingStatus) {
               this.currentToolCalls.set(toolCallId, 'pending')
               this.emit({
                 sessionUpdate: 'tool_call',
@@ -536,6 +614,22 @@ export class PiAcpSession {
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
         let line: number | undefined
+
+        if (isBashTool(toolName)) {
+          const locations = toToolCallLocations(args, this.cwd)
+          const existingStatus = this.currentToolCalls.get(toolCallId)
+          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.emitBashToolCall({
+            sessionUpdate: existingStatus ? 'tool_call_update' : 'tool_call',
+            toolCallId,
+            toolName,
+            args,
+            status: 'in_progress',
+            locations,
+            includeTerminal: !existingStatus
+          })
+          break
+        }
 
         // Capture pre-mutation file contents so we can emit a structured ACP diff.
         const isFileMutation = toolName === 'edit' || toolName === 'write'
@@ -595,6 +689,11 @@ export class PiAcpSession {
         if (!toolCallId) break
 
         const partial = (ev as any).partialResult
+        if (this.bashToolCallIds.has(toolCallId)) {
+          this.emitBashOutputUpdate({ toolCallId, status: 'in_progress', result: partial })
+          break
+        }
+
         const text = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
 
         this.emit({
@@ -615,6 +714,17 @@ export class PiAcpSession {
 
         const result = (ev as any).result
         const isError = Boolean((ev as any).isError)
+        if (this.bashToolCallIds.has(toolCallId)) {
+          this.emitBashOutputUpdate({
+            toolCallId,
+            status: isError ? 'failed' : 'completed',
+            result,
+            isError
+          })
+          this.cleanupToolCall(toolCallId)
+          break
+        }
+
         const text = toolResultToText(result)
 
         const snapshot = this.fileSnapshots.get(toolCallId)
@@ -653,9 +763,7 @@ export class PiAcpSession {
           ...(hasStructuredDiff ? {} : { rawOutput: result })
         })
 
-        this.currentToolCalls.delete(toolCallId)
-        this.fileSnapshots.delete(toolCallId)
-        this.fileMutationToolCallIds.delete(toolCallId)
+        this.cleanupToolCall(toolCallId)
         break
       }
 
@@ -910,10 +1018,7 @@ function toToolKind(toolName: string): ToolKind {
     case 'edit':
       return 'edit'
     case 'bash':
-      // Many ACP clients render `execute` tool calls only via the terminal APIs.
-      // Since this adapter lets pi execute locally (no client terminal delegation),
-      // we report bash as `other` so clients show inline text output blocks.
-      return 'other'
+      return 'execute'
     default:
       return 'other'
   }
