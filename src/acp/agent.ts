@@ -895,7 +895,7 @@ export class PiAcpAgent implements ACPAgent {
     await session.cancel()
   }
 
-  async unstable_listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
+  async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
     // ACP: filter by cwd if provided.
     // Zed currently sends `{}` (no cwd), so we default to the last session cwd to
     // emulate pi's `/resume` picker (project-scoped).

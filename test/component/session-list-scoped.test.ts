@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 
-test('PiAcpAgent: unstable_listSessions defaults to lastSessionCwd when cwd param is omitted', async () => {
+test('PiAcpAgent: listSessions defaults to lastSessionCwd when cwd param is omitted', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-test-'))
 
   const dirA = join(root, 'sessions', '--a--')
@@ -66,7 +66,7 @@ test('PiAcpAgent: unstable_listSessions defaults to lastSessionCwd when cwd para
 
     ;(agent as any).lastSessionCwd = '/cwd/a'
 
-    const listed = await agent.unstable_listSessions({} as any)
+    const listed = await agent.listSessions({} as any)
     assert.equal(listed.sessions.length, 1)
     assert.equal(listed.sessions[0]?.sessionId, 'sess-a')
   } finally {
