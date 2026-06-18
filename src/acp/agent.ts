@@ -398,7 +398,7 @@ export class PiAcpAgent implements ACPAgent {
           const pi = (await session.proc.getCommands()) as any
           const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
-            includeExtensionCommands: false
+            includeExtensionCommands: true
           })
 
           await this.conn.sessionUpdate({
@@ -1077,7 +1077,7 @@ export class PiAcpAgent implements ACPAgent {
           const pi = (await proc.getCommands()) as any
           const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
-            includeExtensionCommands: false
+            includeExtensionCommands: true
           })
 
           await this.conn.sessionUpdate({
@@ -1109,6 +1109,61 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
     await setSessionModel(session.proc, params.modelId)
     await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+  }
+
+  // Extension method handler for custom methods not in the ACP spec.
+  async extMethod(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (method === 'session/status') {
+      const sessionId = typeof params.sessionId === 'string' ? params.sessionId : null
+      if (!sessionId)
+        throw RequestError.invalidParams(`sessionId is required (got params: ${JSON.stringify(params).slice(0, 200)})`)
+
+      const session = this.sessions.get(sessionId)
+      const state = (await session.proc.getState()) as any
+      const stats = (await session.proc.getSessionStats()) as any
+
+      // Extract model info
+      let currentModel: string | null = null
+      const model = state?.model
+      if (model && typeof model === 'object') {
+        const provider = String((model as any).provider ?? '').trim()
+        const id = String((model as any).id ?? '').trim()
+        if (provider && id) currentModel = `${provider}/${id}`
+      }
+
+      // Extract thinking level
+      const thinkingLevel = typeof state?.thinkingLevel === 'string' ? state.thinkingLevel : null
+
+      // Extract token usage
+      const tokens =
+        stats?.tokens && typeof stats.tokens === 'object'
+          ? {
+              input: typeof stats.tokens.input === 'number' ? stats.tokens.input : 0,
+              output: typeof stats.tokens.output === 'number' ? stats.tokens.output : 0,
+              cacheRead: typeof stats.tokens.cacheRead === 'number' ? stats.tokens.cacheRead : 0,
+              cacheWrite: typeof stats.tokens.cacheWrite === 'number' ? stats.tokens.cacheWrite : 0,
+              total: typeof stats.tokens.total === 'number' ? stats.tokens.total : 0
+            }
+          : null
+
+      return {
+        sessionId,
+        model: currentModel,
+        thinkingLevel,
+        messageCount:
+          typeof stats?.totalMessages === 'number'
+            ? stats.totalMessages
+            : typeof state?.messageCount === 'number'
+              ? state.messageCount
+              : null,
+        cost: typeof stats?.cost === 'number' ? stats.cost : null,
+        tokens,
+        contextUsage: stats?.contextUsage ?? null,
+        sessionFile: typeof state?.sessionFile === 'string' ? state.sessionFile : null
+      }
+    }
+
+    throw RequestError.methodNotFound(method)
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {

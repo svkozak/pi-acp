@@ -337,38 +337,46 @@ export class PiAcpSession {
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
-    const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
-
-      // If a turn is already running, enqueue.
-      if (this.pendingTurn) {
-        this.turnQueue.push(queued)
-
-        // Best-effort: notify client that a prompt was queued.
-        // This doesn't work in Zed yet, needs to be revisited
+    // If a turn is already running, steer the agent instead of queuing.
+    if (this.pendingTurn) {
+      try {
+        await this.proc.steer(expandedMessage)
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text: `Queued message (position ${this.turnQueue.length}).`
+            text: `\u21aa Steering message delivered.`
           }
         })
+        await this.flushEmits()
+        return 'end_turn'
+      } catch {
+        // Steer not supported or failed \u2014 fall back to queue.
+        return new Promise<StopReason>(resolve => {
+          const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject: () => resolve('error') }
+          this.turnQueue.push(queued)
 
-        // Also publish queue depth via session info metadata.
-        // This also not visible in the client
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: `Queued message (position ${this.turnQueue.length}). (Steering not available)`
+            }
+          })
+
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
+          })
         })
-
-        return
       }
+    }
 
-      // No turn is running; start immediately.
+    // No turn is running; start immediately.
+    return new Promise<StopReason>((resolve, reject) => {
+      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
       this.startTurn(queued)
     })
-
-    return turnPromise
   }
 
   async cancel(): Promise<void> {
@@ -485,7 +493,43 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
     // The full prompt is finished when we see `agent_end`.
-    this.proc.prompt(t.message, t.images).catch(err => {
+    this.proc.prompt(t.message, t.images).then(() => {
+      // If proc.prompt() resolved successfully but the agent loop never started,
+      // the prompt was handled by an extension command (e.g. /evolve) that returned
+      // without triggering the LLM. In this case, no `agent_end` event will ever come,
+      // so we must resolve the turn here.
+      //
+      // We use a short delay because for normal prompts, preflightResult fires BEFORE
+      // _runAgentPrompt starts, so there's a brief window where proc.prompt() has resolved
+      // but agent_start hasn't arrived yet. 3 seconds is enough for agent_start to arrive
+      // via IPC for normal prompts, but short enough to not leave the user waiting.
+      if (!this.inAgentLoop && this.pendingTurn) {
+        setTimeout(() => {
+          if (!this.inAgentLoop && this.pendingTurn) {
+            void this.flushEmits().finally(() => {
+              const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+              this.pendingTurn?.resolve(reason)
+              this.pendingTurn = null
+              this.inAgentLoop = false
+
+              const next = this.turnQueue.shift()
+              if (next) {
+                this.emit({
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+                })
+                this.startTurn(next)
+              } else {
+                this.emit({
+                  sessionUpdate: 'session_info_update',
+                  _meta: { piAcp: { queueDepth: 0, running: false } }
+                })
+              }
+            })
+          }
+        }, 3000)
+      }
+    }).catch(err => {
       // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
       void this.flushEmits().finally(() => {
@@ -878,14 +922,7 @@ export class PiAcpSession {
     }
 
     if (method === 'input' || method === 'editor') {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: {
-          type: 'text',
-          text: `Pi ${method} UI request is not supported in ACP yet; cancelling it.`
-        } satisfies ContentBlock
-      })
-      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      await this.handleExtensionInput(ev, id)
       return
     }
 
@@ -938,6 +975,26 @@ export class PiAcpSession {
     }
 
     await this.proc.sendExtensionUiResponse({ id, confirmed: selected.outcome.optionId === 'yes' })
+  }
+
+  private async handleExtensionInput(ev: PiRpcEvent, id: string): Promise<void> {
+    const INPUT_OPTIONS: PermissionOption[] = [
+      { optionId: 'text_input', name: 'Type your response', kind: 'text_input' as any }
+    ]
+
+    const selected = await this.requestExtensionPermission(id, ev, INPUT_OPTIONS)
+    if (selected === null) {
+      return
+    }
+
+    if (selected.outcome.outcome === 'cancelled') {
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    // The adapter puts user's text in a 'text' field on the response
+    const text = (selected as any).text ?? ''
+    await this.proc.sendExtensionUiResponse({ id, value: text })
   }
 
   private async requestExtensionPermission(

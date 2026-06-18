@@ -6,6 +6,7 @@ import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpe
 test('PiAcpSession: cancel clears queued prompts', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  proc.steerShouldFail = true
 
   const session = new PiAcpSession({
     sessionId: 's1',
@@ -20,7 +21,9 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   const second = session.prompt('two')
   const third = session.prompt('three')
 
-  // first started, second+third queued
+  // first started, second+third need a tick to enter queue (steer rejection is async)
+  await new Promise(r => setTimeout(r, 10))
+
   assert.equal(proc.prompts.length, 1)
 
   await session.cancel()
@@ -32,8 +35,6 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   assert.equal(await third, 'cancelled')
 
   // finish first prompt as cancelled (agent_end after abort)
-  proc.emit({ type: 'agent_start' })
-  proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
   assert.equal(await first, 'cancelled')
 
