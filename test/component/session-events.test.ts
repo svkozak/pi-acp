@@ -657,6 +657,122 @@ test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
   assert.equal(reason, 'end_turn')
 })
 
+test('PiAcpSession: emits usage_update on agent_end from session stats', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = {
+    cost: 0.1234,
+    contextUsage: { tokens: 1500, contextWindow: 200000, percent: 0.75 }
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  await p
+
+  const usage = conn.updates.find(u => u.update.sessionUpdate === 'usage_update')
+  assert.ok(usage, 'expected a usage_update notification')
+  assert.equal(usage!.sessionId, 's1')
+  assert.deepEqual(usage!.update, {
+    sessionUpdate: 'usage_update',
+    used: 1500,
+    size: 200000,
+    cost: { amount: 0.1234, currency: 'USD' }
+  })
+})
+
+test('PiAcpSession: usage_update omits cost when stats has none and defaults used to 0', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  // Post-compaction: window known but token count not yet available.
+  proc.sessionStats = { contextUsage: { tokens: null, contextWindow: 200000, percent: null } }
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  await p
+
+  const usage = conn.updates.find(u => u.update.sessionUpdate === 'usage_update')
+  assert.ok(usage, 'expected a usage_update notification')
+  assert.deepEqual(usage!.update, {
+    sessionUpdate: 'usage_update',
+    used: 0,
+    size: 200000
+  })
+})
+
+test('PiAcpSession: skips usage_update when no context window is known', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  // No contextUsage (no model bound / before first response); only cost.
+  proc.sessionStats = { cost: 0.5 }
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  await p
+
+  assert.equal(
+    conn.updates.find(u => u.update.sessionUpdate === 'usage_update'),
+    undefined,
+    'should not emit usage_update without a context window'
+  )
+})
+
+test('PiAcpSession: agent_end still resolves when session stats are unavailable', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  // sessionStats left null -> getSessionStats() rejects.
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  const reason = await p
+
+  assert.equal(reason, 'end_turn')
+  assert.equal(proc.getSessionStatsCount, 1)
+  assert.equal(
+    conn.updates.find(u => u.update.sessionUpdate === 'usage_update'),
+    undefined
+  )
+})
+
 test('PiAcpSession: does not re-emit startup info on first prompt after it was already sent', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

@@ -470,6 +470,44 @@ export class PiAcpSession {
     this.bashOutputSnapshots.delete(toolCallId)
   }
 
+  /**
+   * Translate pi's session stats into an ACP `usage_update` notification so
+   * clients can render live context-window / cost usage.
+   *
+   * `usage_update` is part of the ACP schema (currently marked UNSTABLE). It
+   * carries required `used` + `size` token counts and an optional
+   * `cost: { amount, currency }`. We can only report once pi knows the
+   * model's context window, since `used`/`size` are required and paired.
+   */
+  async publishUsage(): Promise<void> {
+    let stats: any
+    try {
+      stats = await this.proc.getSessionStats()
+    } catch {
+      return
+    }
+    if (!stats || typeof stats !== 'object') return
+
+    const ctx = stats.contextUsage
+    const size = ctx && typeof ctx === 'object' && typeof ctx.contextWindow === 'number' ? ctx.contextWindow : undefined
+
+    // No window known yet (no model bound / before the first response): we
+    // can't emit a schema-valid usage_update, so skip.
+    if (size === undefined) return
+
+    // `tokens` may be an estimate before the first response, and null
+    // post-compaction until the next turn (treat as 0 — directionally correct).
+    const used = typeof ctx.tokens === 'number' ? ctx.tokens : 0
+    const cost = typeof stats.cost === 'number' ? { amount: stats.cost, currency: 'USD' } : undefined
+
+    this.emit({
+      sessionUpdate: 'usage_update',
+      used,
+      size,
+      ...(cost ? { cost } : {})
+    })
+  }
+
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
@@ -829,6 +867,8 @@ export class PiAcpSession {
       }
 
       case 'agent_end': {
+        // Emit a usage_update so cost / context numbers are current at turn end.
+        void this.publishUsage()
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void this.flushEmits().finally(() => {

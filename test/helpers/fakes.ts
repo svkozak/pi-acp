@@ -29,6 +29,11 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  getSessionStatsCount = 0
+
+  // Configurable return value for getSessionStats(). When null, the call
+  // rejects (mirroring pi being unavailable / the RPC failing).
+  sessionStats: any = null
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -55,6 +60,12 @@ export class FakePiRpcProcess {
 
   async getState(): Promise<any> {
     return {}
+  }
+
+  async getSessionStats(): Promise<any> {
+    this.getSessionStatsCount += 1
+    if (this.sessionStats === null) throw new Error('getSessionStats unavailable')
+    return this.sessionStats
   }
 
   async getAvailableModels(): Promise<any> {
