@@ -65,10 +65,13 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
     // When quietStartup=true the full prelude is suppressed. However, an update notice
     // (if one exists) is still surfaced because it's high-signal and actionable.
     // The test must tolerate both cases since the live npm check may or may not find an update.
+    // Only one setTimeout is ever scheduled now: the available_commands_update emit
+    // (sent after the session/new response). The startup banner is no longer emitted
+    // out-of-turn via setTimeout -- it is flushed in-turn on the first prompt (see #59).
     if (startupInfo) {
       assert.match(startupInfo, /New version available/)
       assert.equal(setStartupInfoCalled, true)
-      assert.equal(timeouts.length, 2)
+      assert.equal(timeouts.length, 1)
     } else {
       assert.equal(setStartupInfoCalled, false)
       assert.equal(timeouts.length, 1)

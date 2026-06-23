@@ -697,6 +697,61 @@ test('PiAcpSession: does not re-emit startup info on first prompt after it was a
   assert.equal(reason, 'end_turn')
 })
 
+test('PiAcpSession: emits deferred startup info in-turn (not out-of-turn) on first prompt', async () => {
+  // Regression test for https://github.com/svkozak/pi-acp/issues/59
+  // Startup info must NOT be emitted as an agent_message_chunk immediately after
+  // session/new (no prompt is active -> ACP rejects it as out-of-turn). Instead it
+  // is flushed as the first agent_message_chunk of the first prompt turn.
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const notice = 'pi v0.80.1\n---\n\n## Context\n- /home/u/.pi/agent/AGENTS.md'
+
+  // setStartupInfo mirrors what session/new does. Do NOT call sendStartupInfoIfPending()
+  // manually here -- that is exactly the out-of-turn call we removed.
+  session.setStartupInfo(notice)
+
+  // Drain microtasks: no update must have been emitted out-of-turn.
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(conn.updates.length, 0, 'startup info must not be emitted before a prompt turn')
+
+  // Starting the first prompt turn must flush the startup info as the very first
+  // agent_message_chunk, before any other turn update.
+  const p = session.prompt('hello')
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(proc.prompts.length, 1)
+  assert.equal(proc.prompts[0]!.message, 'hello')
+
+  assert.equal(conn.updates[0]!.update.sessionUpdate, 'agent_message_chunk')
+  assert.deepEqual((conn.updates[0]!.update as any).content, { type: 'text', text: notice })
+
+  // The startup info chunk must appear exactly once across the whole turn.
+  const startupChunks = conn.updates.filter(
+    entry =>
+      entry.update.sessionUpdate === 'agent_message_chunk' &&
+      (entry.update as any).content?.type === 'text' &&
+      (entry.update as any).content?.text === notice
+  )
+  assert.equal(startupChunks.length, 1)
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+
+  const reason = await p
+  assert.equal(reason, 'end_turn')
+})
+
 test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

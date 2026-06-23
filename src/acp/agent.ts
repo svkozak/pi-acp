@@ -385,9 +385,13 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    // Try to send it immediately after session/new returns; if the client ignores it,
-    // it will still be emitted as the first chunk of the first prompt.
-    if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
+    // NOTE: Do not emit the startup banner as an `agent_message_chunk` here.
+    // Per the ACP protocol, per-turn updates (agent_message_chunk) must arrive
+    // while a `session/prompt` is active; emitting it right after `session/new`
+    // produces an out-of-turn update that strict ACP clients reject (see issue #59).
+    // Instead, it is flushed at the start of the first prompt turn (see `startTurn`)
+    // and also exposed via `_meta.piAcp.startupInfo` for clients that render it
+    // themselves (e.g. Zed).
 
     // Advertise slash commands (ACP: available_commands_update)
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
