@@ -855,6 +855,20 @@ export class PiAcpSession {
         break
       }
 
+      case 'session_info_changed': {
+        // Forward pi-side session name changes as a live title update, so the
+        // title stays in sync without waiting for a session reload.
+        const name = stringProp(ev, 'name')
+        if (name) {
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            title: name,
+            updatedAt: new Date().toISOString()
+          })
+        }
+        break
+      }
+
       default:
         break
     }
