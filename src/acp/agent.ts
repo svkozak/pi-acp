@@ -538,14 +538,9 @@ export class PiAcpAgent implements ACPAgent {
           return { stopReason: 'end_turn' }
         }
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'session_info_update',
-            title: name,
-            updatedAt: new Date().toISOString()
-          }
-        })
+        // No need to emit session_info_update here — session.proc.setSessionName()
+        // triggers a session_info_changed event from pi, which the session event handler
+        // forwards as session_info_update automatically.
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
