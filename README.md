@@ -155,7 +155,7 @@ Loaded from:
 
 Other built-in commands:
 
-- `/model` - maps to model selector in Zed
+- `/model` - not implemented (use the model selector UI in Zed)
 - `/thinking` - maps to 'mode' selector in Zed
 - `/clear` - not implemented (use ACP client 'new' command)
 
