@@ -1001,6 +1001,7 @@ export class PiAcpAgent implements ACPAgent {
 
         if (isBash) {
           const text = bashResultText(m)
+          const rawInput = (m as any)?.args ?? null
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -1009,6 +1010,7 @@ export class PiAcpAgent implements ACPAgent {
               title: bashCommand(m) ?? toolName,
               kind: 'execute',
               status: 'completed',
+              rawInput,
               content: bashTerminalContent(toolCallId),
               _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
             }
@@ -1020,6 +1022,8 @@ export class PiAcpAgent implements ACPAgent {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: isError ? 'failed' : 'completed',
+              rawInput,
+              rawOutput: m,
               _meta: {
                 ...(text ? bashTerminalOutputMeta(toolCallId, text) : {}),
                 ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))

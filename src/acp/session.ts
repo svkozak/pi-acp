@@ -290,6 +290,7 @@ export class PiAcpSession {
   private fileMutationToolCallIds = new Set<string>()
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
+  private bashRawInputs = new Map<string, unknown>()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -426,6 +427,7 @@ export class PiAcpSession {
     includeTerminal: boolean
   }): void {
     this.bashToolCallIds.add(params.toolCallId)
+    this.bashRawInputs.set(params.toolCallId, params.args)
     this.emit({
       sessionUpdate: params.sessionUpdate,
       toolCallId: params.toolCallId,
@@ -433,6 +435,7 @@ export class PiAcpSession {
       kind: 'execute',
       status: params.status,
       locations: params.locations,
+      rawInput: params.args,
       ...(params.includeTerminal ? { content: bashTerminalContent(params.toolCallId) } : {}),
       ...(params.includeTerminal ? { _meta: bashTerminalInfoMeta(params.toolCallId, this.cwd) } : {})
     })
@@ -448,11 +451,16 @@ export class PiAcpSession {
     const previous = this.bashOutputSnapshots.get(params.toolCallId) ?? ''
     const delta = bashOutputDelta(previous, text)
     this.bashOutputSnapshots.set(params.toolCallId, text)
+    const rawInput = this.bashRawInputs.get(params.toolCallId)
 
     this.emit({
       sessionUpdate: 'tool_call_update',
       toolCallId: params.toolCallId,
       status: params.status,
+      rawInput,
+      ...(params.status === 'completed' || params.status === 'failed'
+        ? { rawOutput: params.result }
+        : {}),
       _meta: {
         ...(delta ? bashTerminalOutputMeta(params.toolCallId, delta) : {}),
         ...(params.status === 'completed' || params.status === 'failed'
@@ -468,6 +476,7 @@ export class PiAcpSession {
     this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
+    this.bashRawInputs.delete(toolCallId)
   }
 
   private startTurn(t: QueuedTurn): void {
