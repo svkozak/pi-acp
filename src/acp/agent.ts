@@ -22,7 +22,7 @@ import {
   type StopReason
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, type PiAcpSession, toToolCallLocations, toToolTitle } from './session.js'
+import { SessionManager, type PiAcpSession, toToolCallLocations, toReplayDiffContent, toToolTitle } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
@@ -31,7 +31,6 @@ import { toolResultToText } from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
-  bashMaxOutputLines,
   bashResultText,
   bashTerminalContent,
   bashTerminalExitMeta,
@@ -966,6 +965,10 @@ export class PiAcpAgent implements ACPAgent {
     const data = (await proc.getMessages()) as any
     const messages = Array.isArray(data?.messages) ? data.messages : []
 
+    // pi stores tool args on the assistant `toolCall` content block, not on the
+    // matching toolResult message. Index them by tool call id so historic
+    // tool results can recover their inputs for titles, locations, and rawInput.
+    const toolCallArgs = new Map<string, unknown>()
     for (const m of messages) {
       const role = String(m?.role ?? '')
 
@@ -983,6 +986,13 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       if (role === 'assistant') {
+        if (Array.isArray(m?.content)) {
+          for (const block of m.content as Array<Record<string, unknown>>) {
+            if (block?.type === 'toolCall' && typeof block.id === 'string') {
+              toolCallArgs.set(block.id, block.arguments)
+            }
+          }
+        }
         const text = normalizePiAssistantText(m?.content)
         if (text) {
           await this.conn.sessionUpdate({
@@ -1000,17 +1010,16 @@ export class PiAcpAgent implements ACPAgent {
         const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
         const isError = Boolean((m as any)?.isError)
         const isBash = isBashTool(toolName)
+        const rawInput = (m as any)?.args ?? toolCallArgs.get(toolCallId) ?? null
 
         if (isBash) {
           const text = bashResultText(m)
-          const rawInput = (m as any)?.args ?? null
-          const displayText = truncateToLastLines(text, bashMaxOutputLines())
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'tool_call',
               toolCallId,
-              title: bashCommand(m) ?? toolName,
+              title: bashCommand(rawInput) ?? toolName,
               kind: 'execute',
               status: 'completed',
               rawInput,
@@ -1028,7 +1037,7 @@ export class PiAcpAgent implements ACPAgent {
               rawInput,
               rawOutput: m,
               _meta: {
-                ...(displayText ? bashTerminalOutputMeta(toolCallId, displayText) : {}),
+                ...(text ? bashTerminalOutputMeta(toolCallId, text) : {}),
                 ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
               }
             }
@@ -1037,7 +1046,6 @@ export class PiAcpAgent implements ACPAgent {
         }
 
         // Create a synthetic ACP tool call to render historic tool usage.
-        const rawInput = (m as any)?.args ?? null
         const title = toToolTitle(toolName, rawInput, params.cwd)
         const locations = toToolCallLocations(rawInput, params.cwd)
         await this.conn.sessionUpdate({
@@ -1054,15 +1062,17 @@ export class PiAcpAgent implements ACPAgent {
           }
         })
 
+        const diffContent = toReplayDiffContent(toolName, rawInput)
         const text = toolResultToText(m)
+        const content = diffContent ?? (text ? [{ type: 'content', content: { type: 'text', text } }] : null)
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
           update: {
             sessionUpdate: 'tool_call_update',
             toolCallId,
             status: isError ? 'failed' : 'completed',
-            content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
-            rawOutput: m
+            content,
+            ...(diffContent ? {} : { rawOutput: m })
           }
         })
       }

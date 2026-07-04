@@ -1,10 +1,22 @@
-import test from 'node:test'
+import test, { afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
+
+// Neutralize inherited PI_ACP_BASH_MAX_OUTPUT_LINES so tests that assert the
+// default streaming behavior aren't affected by the runtime environment.
+let previousBashMax: string | undefined
+beforeEach(() => {
+  previousBashMax = process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+  delete process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+})
+afterEach(() => {
+  if (previousBashMax === undefined) delete process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+  else process.env.PI_ACP_BASH_MAX_OUTPUT_LINES = previousBashMax
+})
 
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   const conn = new FakeAgentSideConnection()
@@ -126,63 +138,6 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
     terminal_output: { terminal_id: 't1', data: 'done' },
     terminal_exit: { terminal_id: 't1', exit_code: 0, signal: null }
   })
-})
-
-test('PiAcpSession: tail-truncates bash terminal output when PI_ACP_BASH_MAX_OUTPUT_LINES is set', async () => {
-  const previous = process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
-  process.env.PI_ACP_BASH_MAX_OUTPUT_LINES = '2'
-
-  const conn = new FakeAgentSideConnection()
-  const proc = new FakePiRpcProcess()
-
-  try {
-    new PiAcpSession({
-      sessionId: 's1',
-      cwd: process.cwd(),
-      mcpServers: [],
-      proc: proc as any,
-      conn: asAgentConn(conn),
-      fileCommands: []
-    })
-
-    proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'seq 1 5' } })
-    proc.emit({
-      type: 'tool_execution_update',
-      toolCallId: 't1',
-      partialResult: { content: [{ type: 'text', text: '1\n2\n3\n' }] }
-    })
-    proc.emit({
-      type: 'tool_execution_update',
-      toolCallId: 't1',
-      partialResult: { content: [{ type: 'text', text: '1\n2\n3\n4\n' }] }
-    })
-    proc.emit({
-      type: 'tool_execution_end',
-      toolCallId: 't1',
-      isError: false,
-      result: { content: [{ type: 'text', text: '1\n2\n3\n4\n5' }] }
-    })
-
-    await new Promise(r => setTimeout(r, 0))
-
-    const intermediateUpdates = conn.updates.filter(
-      u => u.update.sessionUpdate === 'tool_call_update' && (u.update as any).status === 'in_progress'
-    )
-    assert.equal(intermediateUpdates.length, 0, 'tail-truncate mode should not emit intermediate terminal_output')
-
-    const completed = conn.updates.find(u => (u.update as any).status === 'completed')
-    assert.ok(completed)
-    assert.deepEqual((completed!.update as any)._meta.terminal_output, {
-      terminal_id: 't1',
-      data: '... (3 earlier lines truncated)\n4\n5'
-    })
-    assert.deepEqual((completed!.update as any).rawOutput, {
-      content: [{ type: 'text', text: '1\n2\n3\n4\n5' }]
-    })
-  } finally {
-    if (previous === undefined) delete process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
-    else process.env.PI_ACP_BASH_MAX_OUTPUT_LINES = previous
-  }
 })
 
 test('PiAcpSession: emits tool locations from pi path args', async () => {

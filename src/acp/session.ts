@@ -195,6 +195,35 @@ export function toToolTitle(toolName: string, args: unknown, cwd: string): strin
   return toolName
 }
 
+// Reconstruct structured ACP diff content for historic edit/write tool results.
+// Unlike the live path (which snapshots pre-mutation file contents), replay
+// only has the tool args: edit carries {oldText,newText} snippets, write carries
+// the full new content. Pre-mutation contents are unrecoverable, so historic
+// writes render as new-file diffs.
+export function toReplayDiffContent(toolName: string, args: unknown): ToolCallContent[] | undefined {
+  const lower = toolName.toLowerCase()
+  const path = getToolPath(args)
+  if (!path) return undefined
+
+  if (lower === 'write') {
+    const content = (args as { content?: unknown } | null | undefined)?.content
+    if (typeof content === 'string') {
+      return [{ type: 'diff', path, oldText: null, newText: content }]
+    }
+    return undefined
+  }
+
+  if (lower === 'edit') {
+    const edits = getParsedEdits(args)
+    if (edits.length) {
+      return edits.map(edit => ({ type: 'diff', path, oldText: edit.oldText, newText: edit.newText }))
+    }
+    return undefined
+  }
+
+  return undefined
+}
+
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
   private readonly store = new SessionStore()
