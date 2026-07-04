@@ -114,8 +114,10 @@ Point your ACP client to the built `dist/index.js`:
 - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
+- `PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES=true` enables more descriptive ACP tool titles for file tools like `read`, `write`, and `edit`.
+- Default: unset/any other value means file tools keep their plain tool-name titles. Bash titles still show the command text.
 
-You can add the environment variable in the Zed settings with:
+You can add the environment variables in the Zed settings with:
 
 ```json
   "agent_servers": {
@@ -125,6 +127,7 @@ You can add the environment variable in the Zed settings with:
       "args": ["/path/to/pi-acp/dist/index.js"],
       "env": {
           "PI_ACP_ENABLE_EMBEDDED_CONTEXT": "true",
+          "PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES": "true"
       }
     }
   }

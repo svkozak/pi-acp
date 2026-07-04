@@ -139,12 +139,58 @@ function getEditOldTexts(args: unknown): string[] {
   return oldTexts
 }
 
-function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
+export function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
   const path = getToolPath(args)
   if (!path) return undefined
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
+}
+
+export const PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES = 'PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES'
+
+function toDisplayPath(path: string, cwd: string): string {
+  const resolved = isAbsolute(path) ? path : resolvePath(cwd, path)
+  return resolved.startsWith(cwd + '/') ? resolved.slice(cwd.length + 1) : resolved
+}
+
+function descriptiveToolTitlesEnabled(): boolean {
+  return process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES === 'true'
+}
+
+export function toToolTitle(toolName: string, args: unknown, cwd: string): string {
+  const lower = toolName.toLowerCase()
+
+  if (lower === 'bash') {
+    return bashCommand(args) ?? toolName
+  }
+
+  if (!descriptiveToolTitlesEnabled()) {
+    return toolName
+  }
+
+  const path = getToolPath(args)
+  const displayPath = path ? toDisplayPath(path, cwd) : undefined
+
+  if (lower === 'read') {
+    const record = args as { offset?: unknown; limit?: unknown } | null | undefined
+    const offset = typeof record?.offset === 'number' ? record.offset : undefined
+    const limit = typeof record?.limit === 'number' && record.limit > 0 ? record.limit : undefined
+    let range = ''
+    if (offset !== undefined && limit !== undefined) range = ` (${offset} - ${offset + limit - 1})`
+    else if (offset !== undefined) range = ` (from line ${offset})`
+    return displayPath ? `Read ${displayPath}${range}` : 'Read'
+  }
+
+  if (lower === 'write') {
+    return displayPath ? `Write ${displayPath}` : 'Write'
+  }
+
+  if (lower === 'edit') {
+    return displayPath ? `Edit ${displayPath}` : 'Edit'
+  }
+
+  return toolName
 }
 
 export class SessionManager {
@@ -458,9 +504,7 @@ export class PiAcpSession {
       toolCallId: params.toolCallId,
       status: params.status,
       rawInput,
-      ...(params.status === 'completed' || params.status === 'failed'
-        ? { rawOutput: params.result }
-        : {}),
+      ...(params.status === 'completed' || params.status === 'failed' ? { rawOutput: params.result } : {}),
       _meta: {
         ...(delta ? bashTerminalOutputMeta(params.toolCallId, delta) : {}),
         ...(params.status === 'completed' || params.status === 'failed'
@@ -571,12 +615,12 @@ export class PiAcpSession {
                     }
                   })()
 
-            const locations = toToolCallLocations(rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
             const status = existingStatus ?? 'pending'
 
             if (isBashTool(toolName)) {
+              const locations = toToolCallLocations(rawInput, this.cwd)
               if (!existingStatus) this.currentToolCalls.set(toolCallId, 'pending')
               this.emitBashToolCall({
                 sessionUpdate: existingStatus ? 'tool_call_update' : 'tool_call',
@@ -595,17 +639,18 @@ export class PiAcpSession {
                 title: toolName,
                 kind: toToolKind(toolName),
                 status,
-                locations,
+                locations: [],
                 rawInput
               })
             } else {
               // Best-effort: keep rawInput updated while args are streaming.
-              // Keep the existing status (pending or in_progress).
+              // Don't emit locations here because pi streams partial args and
+              // partial paths (e.g. /tmp -> /tmp/test -> ...) confuse clients
+              // like Zed. The final locations are sent at tool_execution_start.
               this.emit({
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
                 status,
-                locations,
                 rawInput
               })
             }
@@ -667,13 +712,15 @@ export class PiAcpSession {
 
         const locations = toToolCallLocations(args, this.cwd, line)
 
+        const title = toToolTitle(toolName, args, this.cwd)
+
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, 'in_progress')
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
+            title,
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
@@ -684,6 +731,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
+            title,
             status: 'in_progress',
             locations,
             rawInput: args

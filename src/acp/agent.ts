@@ -22,7 +22,7 @@ import {
   type StopReason
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, type PiAcpSession } from './session.js'
+import { SessionManager, type PiAcpSession, toToolCallLocations, toToolTitle } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
@@ -1034,15 +1034,19 @@ export class PiAcpAgent implements ACPAgent {
         }
 
         // Create a synthetic ACP tool call to render historic tool usage.
+        const rawInput = (m as any)?.args ?? null
+        const title = toToolTitle(toolName, rawInput, params.cwd)
+        const locations = toToolCallLocations(rawInput, params.cwd)
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
           update: {
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
+            title,
             kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
             status: 'completed',
-            rawInput: null,
+            rawInput,
+            locations,
             rawOutput: m
           }
         })
