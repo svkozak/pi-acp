@@ -40,6 +40,54 @@ export function getAgentDir(): string {
   return process.env.PI_CODING_AGENT_DIR ? resolve(process.env.PI_CODING_AGENT_DIR) : join(homedir(), '.pi', 'agent')
 }
 
+function envFlag(value: string | undefined): boolean | null {
+  if (value == null) return null
+  const normalized = value.trim().toLowerCase()
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+  return null
+}
+
+function settingsPackagesIncludeMcpAdapter(settings: Record<string, unknown>): boolean {
+  const packages = settings.packages
+  if (!Array.isArray(packages)) return false
+  return packages.some(pkg => typeof pkg === 'string' && pkg.includes('pi-mcp-adapter'))
+}
+
+/**
+ * Best-effort detection for whether pi can actually consume MCP config.
+ *
+ * pi-acp can bridge ACP MCP servers, but pi itself only uses them when an MCP
+ * extension such as `pi-mcp-adapter` is installed/enabled. `initialize` does not
+ * include a cwd, so project-local detection is not always possible; this checks
+ * global installation/settings and supports an explicit env override.
+ */
+export function getMcpCapabilities(): { http: boolean; sse: boolean; acp: boolean } {
+  const forced = envFlag(process.env.PI_ACP_ENABLE_MCP)
+  const enabled = forced ?? isMcpAdapterDetected()
+  return { http: enabled, sse: enabled, acp: enabled }
+}
+
+export function isMcpAdapterDetected(cwd?: string): boolean {
+  const agentDir = getAgentDir()
+
+  // `pi install npm:pi-mcp-adapter` installs here globally.
+  if (existsSync(join(agentDir, 'npm', 'node_modules', 'pi-mcp-adapter'))) return true
+  if (existsSync(join(agentDir, 'npm', 'node_modules', '.bin', 'pi-mcp-adapter'))) return true
+
+  // If settings still list the package, advertise support even if the package
+  // manager directory has not been inspected/created yet.
+  if (settingsPackagesIncludeMcpAdapter(readJsonFile(join(agentDir, 'settings.json')))) return true
+
+  if (cwd) {
+    const projectRoot = resolve(cwd)
+    if (existsSync(join(projectRoot, '.pi', 'npm', 'node_modules', 'pi-mcp-adapter'))) return true
+    if (settingsPackagesIncludeMcpAdapter(readJsonFile(join(projectRoot, '.pi', 'settings.json')))) return true
+  }
+
+  return false
+}
+
 /**
  * Mirror pi settings semantics (global + project merge, project overrides global).
  * Only returns the bits we currently need.

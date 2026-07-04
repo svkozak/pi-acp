@@ -27,6 +27,8 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { setupMcpServers, type McpSetupResult } from './mcp/index.js'
+import type { AcpMcpBridge } from './mcp/bridge.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -147,11 +149,33 @@ function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCal
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
 }
 
+const NO_MCP_SETUP: McpSetupResult = { restore: () => {}, bridge: null }
+
+/**
+ * Set up MCP wiring for a session. Never throws: if anything goes wrong we fall
+ * back to a no-op setup so the rest of the session is unaffected (pi simply
+ * won't see those MCP servers).
+ */
+async function safeSetupMcpServers(
+  conn: AgentSideConnection,
+  cwd: string,
+  mcpServers: McpServer[]
+): Promise<McpSetupResult> {
+  if (!Array.isArray(mcpServers) || mcpServers.length === 0) return NO_MCP_SETUP
+  try {
+    return await setupMcpServers(conn, cwd, mcpServers)
+  } catch {
+    return NO_MCP_SETUP
+  }
+}
+
+export { safeSetupMcpServers }
+
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
   private readonly store = new SessionStore()
 
-  /** Dispose all sessions and their underlying pi subprocesses. */
+  /** Dispose all sessions, their MCP bridges, and pi subprocesses. */
   disposeAll(): void {
     for (const [id] of this.sessions) this.close(id)
   }
@@ -162,12 +186,18 @@ export class SessionManager {
   }
 
   /**
-   * Dispose a session's underlying pi process and remove it from the manager.
-   * Used when clients explicitly reload a session and we want a fresh pi subprocess.
+   * Dispose a session's underlying pi process, its MCP bridge, and remove it
+   * from the manager. Used when clients explicitly reload a session, or on
+   * teardown.
    */
   close(sessionId: string): void {
     const s = this.sessions.get(sessionId)
     if (!s) return
+    try {
+      s.disposeMcp()
+    } catch {
+      // ignore
+    }
     try {
       s.proc.dispose?.()
     } catch {
@@ -184,7 +214,21 @@ export class SessionManager {
     }
   }
 
+  /** Find the ACP MCP bridge owning a given connectionId, if any. */
+  findBridgeByConnectionId(connectionId: string): AcpMcpBridge | null {
+    for (const [, s] of this.sessions) {
+      const bridge = s.mcpBridge
+      if (bridge?.hasConnection(connectionId)) return bridge
+    }
+    return null
+  }
+
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
+    // Wire ACP-provided MCP servers through to pi BEFORE spawning pi, so pi
+    // picks up the merged `.pi/mcp.json` (and the shim sockets for ACP
+    // transport) at startup.
+    const mcpSetup = await safeSetupMcpServers(params.conn, params.cwd, params.mcpServers)
+
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
     let proc: PiRpcProcess
@@ -194,6 +238,13 @@ export class SessionManager {
         piCommand: params.piCommand
       })
     } catch (e) {
+      // Spawn failed; clean up the MCP wiring we just set up.
+      try {
+        mcpSetup.restore()
+        await mcpSetup.bridge?.dispose()
+      } catch {
+        // ignore
+      }
       if (e instanceof PiRpcSpawnError) {
         throw RequestError.internalError({ code: e.code }, e.message)
       }
@@ -220,7 +271,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      mcpSetup
     })
 
     this.sessions.set(sessionId, session)
@@ -235,9 +287,13 @@ export class SessionManager {
 
   /**
    * Used by session/load: create a session object bound to an existing sessionId/proc
-   * if it isn't already registered.
+   * if it isn't already registered. `mcpSetup` is prepared by the caller (which
+   * owns the spawn) before spawning pi.
    */
-  getOrCreate(sessionId: string, params: SessionCreateParams & { proc: PiRpcProcess }): PiAcpSession {
+  getOrCreate(
+    sessionId: string,
+    params: SessionCreateParams & { proc: PiRpcProcess; mcpSetup?: McpSetupResult }
+  ): PiAcpSession {
     const existing = this.sessions.get(sessionId)
     if (existing) return existing
 
@@ -247,7 +303,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      mcpSetup: params.mcpSetup
     })
 
     this.sessions.set(sessionId, session)
@@ -302,6 +359,7 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    mcpSetup?: McpSetupResult
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -309,8 +367,27 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.mcpSetup = opts.mcpSetup ?? null
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
+  }
+
+  private readonly mcpSetup: McpSetupResult | null
+
+  /** The MCP-over-ACP bridge for this session, if any. */
+  get mcpBridge(): AcpMcpBridge | null {
+    return this.mcpSetup?.bridge ?? null
+  }
+
+  /** Tear down MCP wiring (restore `.pi/mcp.json`, dispose shim sockets). */
+  disposeMcp(): void {
+    if (!this.mcpSetup) return
+    try {
+      this.mcpSetup.restore()
+    } catch {
+      // ignore
+    }
+    void this.mcpSetup.bridge?.dispose().catch(() => {})
   }
 
   setStartupInfo(text: string) {
