@@ -116,6 +116,8 @@ Point your ACP client to the built `dist/index.js`:
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
 - `PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES=true` enables more descriptive ACP tool titles for file tools like `read`, `write`, and `edit`.
 - Default: unset/any other value means file tools keep their plain tool-name titles. Bash titles still show the command text.
+- `PI_ACP_BASH_MAX_OUTPUT_LINES=N` limits the number of bash output lines rendered in the client's terminal view to the last `N` lines, matching pi's native TUI behavior. The full output is always preserved in `rawOutput` for the model/session history.
+- Default: unset means all lines are streamed (existing behavior).
 
 You can add the environment variables in the Zed settings with:
 

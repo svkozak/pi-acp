@@ -189,3 +189,58 @@ test('PiAcpAgent: loadSession replays read toolResult with locations and descrip
     else process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES = previous
   }
 })
+
+test('PiAcpAgent: loadSession tail-truncates bash output when PI_ACP_BASH_MAX_OUTPUT_LINES is set', async () => {
+  const originalSpawn = PiRpcProcess.spawn
+  const previous = process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+  process.env.PI_ACP_BASH_MAX_OUTPUT_LINES = '2'
+  ;(PiRpcProcess as any).spawn = async () => {
+    return {
+      onEvent: () => () => {},
+      getMessages: async () => ({
+        messages: [
+          {
+            role: 'toolResult',
+            toolCallId: 'call_4',
+            toolName: 'bash',
+            args: { command: 'seq 1 5' },
+            content: [{ type: 'text', text: '1\n2\n3\n4\n5' }],
+            isError: false
+          }
+        ]
+      }),
+      getAvailableModels: async () => ({ models: [] }),
+      getState: async () => ({ thinkingLevel: 'medium' })
+    } as any
+  }
+
+  try {
+    const conn = new FakeAgentSideConnection()
+    const agent = new PiAcpAgent(asAgentConn(conn))
+    ;(agent as any).store = new FakeStore()
+
+    await agent.loadSession({ sessionId: 's1', cwd: '/tmp/project', mcpServers: [] } as any)
+
+    const updates = conn.updates.map(u => (u as any).update)
+
+    const toolCallUpdate = updates.find(u => u?.sessionUpdate === 'tool_call_update')
+    assert.ok(toolCallUpdate)
+    assert.equal(toolCallUpdate.toolCallId, 'call_4')
+    assert.deepEqual(toolCallUpdate._meta.terminal_output, {
+      terminal_id: 'call_4',
+      data: '... (3 earlier lines truncated)\n4\n5'
+    })
+    assert.deepEqual(toolCallUpdate.rawOutput, {
+      role: 'toolResult',
+      toolCallId: 'call_4',
+      toolName: 'bash',
+      args: { command: 'seq 1 5' },
+      content: [{ type: 'text', text: '1\n2\n3\n4\n5' }],
+      isError: false
+    })
+  } finally {
+    PiRpcProcess.spawn = originalSpawn
+    if (previous === undefined) delete process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+    else process.env.PI_ACP_BASH_MAX_OUTPUT_LINES = previous
+  }
+})

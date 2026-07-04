@@ -128,6 +128,63 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
   })
 })
 
+test('PiAcpSession: tail-truncates bash terminal output when PI_ACP_BASH_MAX_OUTPUT_LINES is set', async () => {
+  const previous = process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+  process.env.PI_ACP_BASH_MAX_OUTPUT_LINES = '2'
+
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  try {
+    new PiAcpSession({
+      sessionId: 's1',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
+
+    proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'seq 1 5' } })
+    proc.emit({
+      type: 'tool_execution_update',
+      toolCallId: 't1',
+      partialResult: { content: [{ type: 'text', text: '1\n2\n3\n' }] }
+    })
+    proc.emit({
+      type: 'tool_execution_update',
+      toolCallId: 't1',
+      partialResult: { content: [{ type: 'text', text: '1\n2\n3\n4\n' }] }
+    })
+    proc.emit({
+      type: 'tool_execution_end',
+      toolCallId: 't1',
+      isError: false,
+      result: { content: [{ type: 'text', text: '1\n2\n3\n4\n5' }] }
+    })
+
+    await new Promise(r => setTimeout(r, 0))
+
+    const intermediateUpdates = conn.updates.filter(
+      u => u.update.sessionUpdate === 'tool_call_update' && (u.update as any).status === 'in_progress'
+    )
+    assert.equal(intermediateUpdates.length, 0, 'tail-truncate mode should not emit intermediate terminal_output')
+
+    const completed = conn.updates.find(u => (u.update as any).status === 'completed')
+    assert.ok(completed)
+    assert.deepEqual((completed!.update as any)._meta.terminal_output, {
+      terminal_id: 't1',
+      data: '... (3 earlier lines truncated)\n4\n5'
+    })
+    assert.deepEqual((completed!.update as any).rawOutput, {
+      content: [{ type: 'text', text: '1\n2\n3\n4\n5' }]
+    })
+  } finally {
+    if (previous === undefined) delete process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+    else process.env.PI_ACP_BASH_MAX_OUTPUT_LINES = previous
+  }
+})
+
 test('PiAcpSession: emits tool locations from pi path args', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

@@ -18,13 +18,15 @@ import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
   bashExitCode,
+  bashMaxOutputLines,
   bashOutputDelta,
   bashResultText,
   bashTerminalContent,
   bashTerminalExitMeta,
   bashTerminalInfoMeta,
   bashTerminalOutputMeta,
-  isBashTool
+  isBashTool,
+  truncateToLastLines
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
 
@@ -494,11 +496,33 @@ export class PiAcpSession {
     isError?: boolean
   }): void {
     const text = bashResultText(params.result)
+    const rawInput = this.bashRawInputs.get(params.toolCallId)
+    const maxLines = bashMaxOutputLines()
+
+    if (maxLines != null) {
+      // Tail-truncate mode: buffer output and only emit the final tail on
+      // completion. ACP terminal_output is append-only, so we cannot stream
+      // live and later hide earlier lines.
+      if (params.status === 'completed' || params.status === 'failed') {
+        const displayText = truncateToLastLines(text, maxLines)
+        this.emit({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: params.toolCallId,
+          status: params.status,
+          rawInput,
+          rawOutput: params.result,
+          _meta: {
+            ...(displayText ? bashTerminalOutputMeta(params.toolCallId, displayText) : {}),
+            ...bashTerminalExitMeta(params.toolCallId, bashExitCode(params.result, Boolean(params.isError)))
+          }
+        })
+      }
+      return
+    }
+
     const previous = this.bashOutputSnapshots.get(params.toolCallId) ?? ''
     const delta = bashOutputDelta(previous, text)
     this.bashOutputSnapshots.set(params.toolCallId, text)
-    const rawInput = this.bashRawInputs.get(params.toolCallId)
-
     this.emit({
       sessionUpdate: 'tool_call_update',
       toolCallId: params.toolCallId,

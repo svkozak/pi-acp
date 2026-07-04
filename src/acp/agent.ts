@@ -31,12 +31,14 @@ import { toolResultToText } from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
+  bashMaxOutputLines,
   bashResultText,
   bashTerminalContent,
   bashTerminalExitMeta,
   bashTerminalInfoMeta,
   bashTerminalOutputMeta,
-  isBashTool
+  isBashTool,
+  truncateToLastLines
 } from './translate/bash.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
@@ -1002,6 +1004,7 @@ export class PiAcpAgent implements ACPAgent {
         if (isBash) {
           const text = bashResultText(m)
           const rawInput = (m as any)?.args ?? null
+          const displayText = truncateToLastLines(text, bashMaxOutputLines())
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -1025,7 +1028,7 @@ export class PiAcpAgent implements ACPAgent {
               rawInput,
               rawOutput: m,
               _meta: {
-                ...(text ? bashTerminalOutputMeta(toolCallId, text) : {}),
+                ...(displayText ? bashTerminalOutputMeta(toolCallId, displayText) : {}),
                 ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
               }
             }
