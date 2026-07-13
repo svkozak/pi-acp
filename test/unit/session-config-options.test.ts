@@ -85,7 +85,8 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
           { value: 'low', name: 'Thinking: low', description: null },
           { value: 'medium', name: 'Thinking: medium', description: null },
           { value: 'high', name: 'Thinking: high', description: null },
-          { value: 'xhigh', name: 'Thinking: xhigh', description: null }
+          { value: 'xhigh', name: 'Thinking: xhigh', description: null },
+          { value: 'max', name: 'Thinking: max', description: null }
         ]
       }
     ])
