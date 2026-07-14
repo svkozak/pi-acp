@@ -120,6 +120,7 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
 
   const storeUpserts: any[] = []
   const setModelCalls: Array<{ provider: string; modelId: string }> = []
+  let usageRefreshCount = 0
   const spawnCalls: any[] = []
   const state = {
     thinkingLevel: 'medium',
@@ -129,7 +130,10 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
   const sessions = new FakeSessions((sessionId, params) => ({
     sessionId,
     cwd: params.cwd,
-    proc: params.proc
+    proc: params.proc,
+    async refreshUsage() {
+      usageRefreshCount += 1
+    }
   }))
 
   const originalSpawn = PiRpcProcess.spawn
@@ -177,6 +181,7 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
       }
     ])
     assert.deepEqual(setModelCalls, [{ provider: 'test', modelId: 'beta' }])
+    assert.equal(usageRefreshCount, 1)
     assert.equal(result.configOptions.find(option => option.id === 'model')?.currentValue, 'test/beta')
     assert.deepEqual(storeUpserts, [
       {

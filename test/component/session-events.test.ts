@@ -819,3 +819,111 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   const reason = await p
   assert.equal(reason, 'end_turn')
 })
+
+test('PiAcpSession: emits current context usage and cumulative cost after a completed turn', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = {
+    cost: 0.45,
+    contextUsage: { tokens: 60_000, contextWindow: 200_000, percent: 30 }
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const prompt = session.prompt('report usage')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+
+  assert.equal(await prompt, 'end_turn')
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.deepEqual(
+    conn.updates.find(message => message.update.sessionUpdate === 'usage_update'),
+    {
+      sessionId: 's1',
+      update: {
+        sessionUpdate: 'usage_update',
+        used: 60_000,
+        size: 200_000,
+        cost: { amount: 0.45, currency: 'USD' }
+      }
+    }
+  )
+})
+
+test('PiAcpSession: does not report unknown usage as zero', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = {
+    cost: 0.45,
+    contextUsage: { tokens: null, contextWindow: 200_000, percent: null }
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const prompt = session.prompt('report usage')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+
+  assert.equal(await prompt, 'end_turn')
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.equal(conn.updates.some(message => message.update.sessionUpdate === 'usage_update'), false)
+})
+
+test('PiAcpSession: discards a stale usage refresh that finishes after a newer one', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const pending: Array<(stats: unknown) => void> = []
+  proc.getSessionStats = async () =>
+    new Promise(resolve => {
+      pending.push(resolve)
+    })
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const olderRefresh = session.refreshUsage()
+  const newerRefresh = session.refreshUsage()
+
+  pending[1]!({ cost: 0.2, contextUsage: { tokens: 2_000, contextWindow: 10_000 } })
+  await newerRefresh
+  pending[0]!({ cost: 0.1, contextUsage: { tokens: 1_000, contextWindow: 10_000 } })
+  await olderRefresh
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.deepEqual(
+    conn.updates.filter(message => message.update.sessionUpdate === 'usage_update'),
+    [
+      {
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 2_000,
+          size: 10_000,
+          cost: { amount: 0.2, currency: 'USD' }
+        }
+      }
+    ]
+  )
+})
