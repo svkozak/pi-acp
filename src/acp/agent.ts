@@ -181,7 +181,13 @@ export class PiAcpAgent implements ACPAgent {
     opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers'] }
   ): Promise<PiAcpSession> {
     const existing = this.sessions.maybeGet(sessionId)
-    if (existing) return existing
+    // If the pi child died (crash, or an extension called ctx.shutdown()), evict the stale
+    // session so we respawn pi from the recorded session file instead of writing to a dead pipe.
+    if (existing?.proc.isAlive?.() === false) {
+      this.sessions.close(sessionId)
+    } else if (existing) {
+      return existing
+    }
 
     const inFlight = this.restoringSessions.get(sessionId)
     if (inFlight) return inFlight
