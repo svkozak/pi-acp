@@ -349,7 +349,7 @@ export class PiAcpAgent implements ACPAgent {
     })
 
     const quietStartup = getQuietStartup(params.cwd)
-    const updateNotice = buildUpdateNotice()
+    const updateNotice = process.env.PI_ACP_CHECK_FOR_UPDATES === 'false' ? null : buildUpdateNotice()
 
     // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
     // the "New version available" notice (if any) since it's high-signal and actionable.
