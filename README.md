@@ -150,6 +150,7 @@ Loaded from:
 - `/name <name>` – set session display name
 - `/queue all|one-at-a-time` – set pi queue mode (unstable feature)
 - `/changelog` – print the installed pi changelog (best-effort)
+- `/reload` – reload prompts, skills, extensions, and context files for the current ACP session
 - `/steering` - maps to `pi` Steering Mode, get/set
 - `/follow-up` - pats to `pi` Follow-up Mode, get/set
 
