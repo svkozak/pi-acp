@@ -18,8 +18,7 @@ import {
   type SetSessionConfigOptionRequest,
   type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
-  type SetSessionModeResponse,
-  type StopReason
+  type SetSessionModeResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
@@ -887,12 +886,14 @@ export class PiAcpAgent implements ACPAgent {
 
     const result = await session.prompt(message, images)
 
-    // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
-    // unless we know this was a cancellation.
-    const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
+    // ACP StopReason has no "error"; failures must surface as JSON-RPC errors,
+    // not a silent empty end_turn (#82).
+    if (result === 'error') {
+      if (session.wasCancelRequested()) return { stopReason: 'cancelled' }
+      throw RequestError.internalError({}, 'pi prompt failed (the pi process may have exited)')
+    }
 
-    return { stopReason }
+    return { stopReason: result }
   }
 
   async cancel(params: CancelNotification): Promise<void> {

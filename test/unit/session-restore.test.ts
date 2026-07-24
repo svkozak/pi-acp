@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { RequestError } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
@@ -162,6 +163,49 @@ test('PiAcpAgent: prompt evicts a session whose pi child died and respawns from 
       }
     ])
     assert.deepEqual(promptCalls, [{ message: 'still there?', images: [] }])
+  } finally {
+    PiRpcProcess.spawn = originalSpawn
+  }
+})
+
+test('PiAcpAgent: prompt surfaces a JSON-RPC error when the pi child dies after the isAlive check', async () => {
+  const conn = new FakeAgentSideConnection()
+  const spawnCalls: any[] = []
+
+  // isAlive() still reports true when restoreSession checks it, but the child is
+  // already gone, so the stdin write rejects with EPIPE.
+  const racyProc = {
+    isAlive: () => true,
+    onEvent: () => () => {},
+    prompt: () => Promise.reject(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+  }
+
+  const originalSpawn = PiRpcProcess.spawn
+  ;(PiRpcProcess as any).spawn = async (params: any) => {
+    spawnCalls.push(params)
+    return { onEvent: () => () => {} } as any
+  }
+
+  try {
+    const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
+    // Real PiAcpSession (not FakeSessions) so the rejection flows through startTurn.
+    ;(agent as any).sessions.getOrCreate('stored-session', {
+      cwd: '/tmp/store-project',
+      mcpServers: [],
+      conn: asAgentConn(conn),
+      proc: racyProc as any,
+      fileCommands: []
+    })
+
+    await assert.rejects(
+      agent.prompt({
+        sessionId: 'stored-session',
+        prompt: [{ type: 'text', text: 'still there?' }]
+      } as any),
+      (e: any) => e instanceof RequestError && e.code === -32603
+    )
+
+    assert.deepEqual(spawnCalls, [])
   } finally {
     PiRpcProcess.spawn = originalSpawn
   }
