@@ -819,3 +819,63 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   const reason = await p
   assert.equal(reason, 'end_turn')
 })
+
+test('PiAcpSession: tags extension notify chunks with severity in _meta', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'n1',
+    method: 'notify',
+    message: 'MCP: connection failed',
+    notifyType: 'error'
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.deepEqual(conn.updates[0]!.update, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'MCP: connection failed' },
+    _meta: { piAcp: { notify: { level: 'error' } } }
+  })
+  assert.deepEqual(proc.extensionUiResponses[0], { id: 'n1', cancelled: true })
+})
+
+test('PiAcpSession: defaults notify severity to info when notifyType is absent', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'n2',
+    method: 'notify',
+    message: 'heads up'
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.deepEqual((conn.updates[0]!.update as any)._meta, {
+    piAcp: { notify: { level: 'info' } }
+  })
+})

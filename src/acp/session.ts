@@ -892,7 +892,8 @@ export class PiAcpSession {
     if (method === 'notify') {
       this.emit({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock
+        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock,
+        _meta: { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
       })
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return
