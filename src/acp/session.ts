@@ -58,6 +58,8 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
+const CONTEXT_USAGE_TIMEOUT_MS = 1_000
+const CONTEXT_USAGE_TIMEOUT = Symbol('context-usage-timeout')
 
 export function toContextUsageUpdate(stats: PiSessionStats): SessionUpdate | null {
   const used = stats.contextUsage?.tokens
@@ -439,11 +441,24 @@ export class PiAcpSession {
   }
 
   async refreshContextUsage(): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+
     try {
-      const update = toContextUsageUpdate(await this.proc.getSessionStats())
-      if (update) this.emit(update)
+      const stats = await Promise.race([
+        this.proc.getSessionStats(),
+        new Promise<typeof CONTEXT_USAGE_TIMEOUT>(resolve => {
+          timeout = setTimeout(() => resolve(CONTEXT_USAGE_TIMEOUT), CONTEXT_USAGE_TIMEOUT_MS)
+        })
+      ])
+
+      if (stats !== CONTEXT_USAGE_TIMEOUT) {
+        const update = toContextUsageUpdate(stats)
+        if (update) this.emit(update)
+      }
     } catch {
       // Context usage is auxiliary and must not affect prompt completion.
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
     }
 
     await this.flushEmits()

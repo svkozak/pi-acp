@@ -872,6 +872,41 @@ test('PiAcpSession: stats failures do not change the prompt stop reason', async 
   )
 })
 
+test('PiAcpSession: stats timeout does not block prompt completion', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  ;(globalThis as any).setTimeout = (callback: () => void) => {
+    queueMicrotask(callback)
+    return 0 as any
+  }
+
+  try {
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+    proc.getSessionStats = () => new Promise<never>(() => {})
+
+    const session = new PiAcpSession({
+      sessionId: 's1',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
+
+    const prompt = session.prompt('hello')
+    proc.emit({ type: 'agent_start' })
+    proc.emit({ type: 'agent_end' })
+
+    assert.equal(await prompt, 'end_turn')
+    assert.equal(
+      conn.updates.some(update => update.update.sessionUpdate === 'usage_update'),
+      false
+    )
+  } finally {
+    ;(globalThis as any).setTimeout = realSetTimeout
+  }
+})
+
 test('PiAcpSession: missing stats support is a silent no-op', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
