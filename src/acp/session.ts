@@ -416,6 +416,57 @@ export class PiAcpSession {
     await this.lastEmit
   }
 
+  private async emitContextUsage(): Promise<void> {
+    try {
+      const usage = (await this.proc.getSessionStats()).contextUsage
+      const used = usage?.tokens
+      const size = usage?.contextWindow
+
+      if (
+        typeof used !== 'number' ||
+        !Number.isFinite(used) ||
+        used < 0 ||
+        typeof size !== 'number' ||
+        !Number.isFinite(size) ||
+        size <= 0
+      ) {
+        return
+      }
+
+      this.emit({
+        sessionUpdate: 'usage_update',
+        used,
+        size
+      })
+    } catch {
+      // Context usage is auxiliary and must not affect prompt completion.
+    }
+  }
+
+  private async finishTurn(): Promise<void> {
+    await this.emitContextUsage()
+    await this.flushEmits()
+
+    const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+    this.pendingTurn?.resolve(reason)
+    this.pendingTurn = null
+    this.inAgentLoop = false
+
+    const next = this.turnQueue.shift()
+    if (next) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+      })
+      this.startTurn(next)
+    } else {
+      this.emit({
+        sessionUpdate: 'session_info_update',
+        _meta: { piAcp: { queueDepth: 0, running: false } }
+      })
+    }
+  }
+
   private emitBashToolCall(params: {
     sessionUpdate: 'tool_call' | 'tool_call_update'
     toolCallId: string
@@ -829,29 +880,7 @@ export class PiAcpSession {
       }
 
       case 'agent_end': {
-        // Ensure all updates derived from pi events are delivered before we resolve
-        // the ACP `session/prompt` request.
-        void this.flushEmits().finally(() => {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
-          this.pendingTurn = null
-          this.inAgentLoop = false
-
-          // Start next queued prompt, if any.
-          const next = this.turnQueue.shift()
-          if (next) {
-            this.emit({
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
-            })
-            this.startTurn(next)
-          } else {
-            this.emit({
-              sessionUpdate: 'session_info_update',
-              _meta: { piAcp: { queueDepth: 0, running: false } }
-            })
-          }
-        })
+        void this.finishTurn()
         break
       }
 
