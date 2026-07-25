@@ -68,6 +68,27 @@ type PiExtensionUiResponse =
 
 export type PiRpcEvent = Record<string, unknown>
 
+export interface PiContextUsage {
+  tokens: number | null
+  contextWindow: number
+  percent?: number | null
+}
+
+export interface PiSessionStats {
+  sessionFile?: string
+  sessionId?: string
+  totalMessages?: number
+  tokens?: {
+    input?: number
+    output?: number
+    cacheRead?: number
+    cacheWrite?: number
+    total?: number
+  }
+  cost?: number
+  contextUsage?: PiContextUsage
+}
+
 type SpawnParams = {
   cwd: string
   /** Optional override for `pi` executable name/path */
@@ -284,10 +305,10 @@ export class PiRpcProcess {
     if (!res.success) throw new Error(`pi set_auto_compaction failed: ${res.error ?? JSON.stringify(res.data)}`)
   }
 
-  async getSessionStats(): Promise<unknown> {
+  async getSessionStats(): Promise<PiSessionStats> {
     const res = await this.request({ type: 'get_session_stats' })
     if (!res.success) throw new Error(`pi get_session_stats failed: ${res.error ?? JSON.stringify(res.data)}`)
-    return res.data
+    return res.data as PiSessionStats
   }
 
   async setSessionName(name: string): Promise<void> {

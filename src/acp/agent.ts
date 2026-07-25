@@ -476,7 +476,7 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       if (cmd === 'session') {
-        const stats = (await session.proc.getSessionStats()) as any
+        const stats = await session.proc.getSessionStats()
 
         const lines: string[] = []
         if (stats?.sessionId) lines.push(`Session: ${stats.sessionId}`)
