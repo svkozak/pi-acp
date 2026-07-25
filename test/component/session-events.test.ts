@@ -806,9 +806,13 @@ test('PiAcpSession: skips context usage when tokens are unknown after compaction
 test('PiAcpSession: skips invalid context usage values', async t => {
   const invalidValues = [
     { name: 'negative tokens', tokens: -1, contextWindow: 100 },
+    { name: 'fractional tokens', tokens: 1.5, contextWindow: 100 },
+    { name: 'unsafe integer tokens', tokens: Number.MAX_SAFE_INTEGER + 1, contextWindow: 100 },
     { name: 'non-finite tokens', tokens: Number.NaN, contextWindow: 100 },
     { name: 'zero context window', tokens: 10, contextWindow: 0 },
     { name: 'negative context window', tokens: 10, contextWindow: -1 },
+    { name: 'fractional context window', tokens: 10, contextWindow: 100.5 },
+    { name: 'unsafe integer context window', tokens: 10, contextWindow: Number.MAX_SAFE_INTEGER + 1 },
     { name: 'non-finite context window', tokens: 10, contextWindow: Number.POSITIVE_INFINITY }
   ]
 

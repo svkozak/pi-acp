@@ -67,10 +67,10 @@ export function toContextUsageUpdate(stats: PiSessionStats): SessionUpdate | nul
 
   if (
     typeof used !== 'number' ||
-    !Number.isFinite(used) ||
+    !Number.isSafeInteger(used) ||
     used < 0 ||
     typeof size !== 'number' ||
-    !Number.isFinite(size) ||
+    !Number.isSafeInteger(size) ||
     size <= 0
   ) {
     return null
