@@ -129,7 +129,8 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
   const sessions = new FakeSessions((sessionId, params) => ({
     sessionId,
     cwd: params.cwd,
-    proc: params.proc
+    proc: params.proc,
+    async refreshContextUsage() {}
   }))
 
   const originalSpawn = PiRpcProcess.spawn

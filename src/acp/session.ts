@@ -11,7 +11,7 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
-import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
+import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent, type PiSessionStats } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -58,6 +58,28 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
+
+export function toContextUsageUpdate(stats: PiSessionStats): SessionUpdate | null {
+  const used = stats.contextUsage?.tokens
+  const size = stats.contextUsage?.contextWindow
+
+  if (
+    typeof used !== 'number' ||
+    !Number.isFinite(used) ||
+    used < 0 ||
+    typeof size !== 'number' ||
+    !Number.isFinite(size) ||
+    size <= 0
+  ) {
+    return null
+  }
+
+  return {
+    sessionUpdate: 'usage_update',
+    used,
+    size
+  }
+}
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
@@ -416,36 +438,19 @@ export class PiAcpSession {
     await this.lastEmit
   }
 
-  private async emitContextUsage(): Promise<void> {
+  async refreshContextUsage(): Promise<void> {
     try {
-      const usage = (await this.proc.getSessionStats()).contextUsage
-      const used = usage?.tokens
-      const size = usage?.contextWindow
-
-      if (
-        typeof used !== 'number' ||
-        !Number.isFinite(used) ||
-        used < 0 ||
-        typeof size !== 'number' ||
-        !Number.isFinite(size) ||
-        size <= 0
-      ) {
-        return
-      }
-
-      this.emit({
-        sessionUpdate: 'usage_update',
-        used,
-        size
-      })
+      const update = toContextUsageUpdate(await this.proc.getSessionStats())
+      if (update) this.emit(update)
     } catch {
       // Context usage is auxiliary and must not affect prompt completion.
     }
+
+    await this.flushEmits()
   }
 
   private async finishTurn(): Promise<void> {
-    await this.emitContextUsage()
-    await this.flushEmits()
+    await this.refreshContextUsage()
 
     const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
     this.pendingTurn?.resolve(reason)

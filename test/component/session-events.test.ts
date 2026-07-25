@@ -872,6 +872,28 @@ test('PiAcpSession: stats failures do not change the prompt stop reason', async 
   )
 })
 
+test('PiAcpSession: missing stats support is a silent no-op', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  ;(proc as any).getSessionStats = undefined
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  await session.refreshContextUsage()
+
+  assert.equal(
+    conn.updates.some(update => update.update.sessionUpdate === 'usage_update'),
+    false
+  )
+})
+
 test('PiAcpSession: usage notification failures do not change the prompt stop reason', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

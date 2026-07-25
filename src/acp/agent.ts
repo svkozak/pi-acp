@@ -388,6 +388,9 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
+    // The client must learn the session ID before receiving session updates.
+    setTimeout(() => session.refreshContextUsage(), 0)
+
     // Try to send it immediately after session/new returns; if the client ignores it,
     // it will still be emitted as the first chunk of the first prompt.
     if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
@@ -1060,6 +1063,8 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
+    await session.refreshContextUsage()
+
     const { configOptions, models, modes } = await getSessionConfiguration(proc)
 
     const response = {
@@ -1138,6 +1143,7 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
     await setSessionModel(session.proc, params.modelId)
     await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    await session.refreshContextUsage()
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1167,6 +1173,7 @@ export class PiAcpAgent implements ACPAgent {
   async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
     const session = await this.restoreSession(params.sessionId)
     const configId = String(params.configId)
+    let refreshContextUsage = false
 
     if (typeof params.value !== 'string') {
       throw RequestError.invalidParams(`Expected string value for config option: ${configId}`)
@@ -1174,6 +1181,7 @@ export class PiAcpAgent implements ACPAgent {
 
     if (configId === MODEL_CONFIG_ID) {
       await setSessionModel(session.proc, params.value)
+      refreshContextUsage = true
     } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
       if (!isThinkingLevel(params.value)) {
         throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
@@ -1193,6 +1201,7 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    if (refreshContextUsage) await session.refreshContextUsage()
     return { configOptions }
   }
 }
