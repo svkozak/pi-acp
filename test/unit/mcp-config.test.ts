@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { acpMcpServerToPiConfig, writeManagedMcpConfig } from '../../src/acp/mcp/config.js'
@@ -103,6 +103,37 @@ test('writeManagedMcpConfig: merges with existing user file and restores it', ()
     assert.ok(restored.mcpServers['user-srv'], 'user server still there after restore')
     assert.ok(!restored.mcpServers['acp-srv'], 'managed server removed after restore')
     assert.ok(!('_piAcpManaged' in restored), 'marker removed after restore')
+  } finally {
+    rmSync(cwd, { recursive: true, force: true })
+  }
+})
+
+test('writeManagedMcpConfig: refuses to overwrite user config when the backup cannot be created', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-'))
+  try {
+    mkdirSync(join(cwd, '.pi'), { recursive: true })
+    const path = join(cwd, '.pi', 'mcp.json')
+    const original = JSON.stringify({ mcpServers: { 'user-srv': { command: 'u', args: [] } } })
+    writeFileSync(path, original)
+
+    // Dangling symlink at the backup path: existsSync() follows it (false), but
+    // copyFileSync() fails writing through it — simulating a failed backup while
+    // the config file itself is still writable.
+    try {
+      symlinkSync(join(cwd, 'missing-dir', 'target'), `${path}.pi-acp.bak`)
+    } catch {
+      t.skip('symlinks not supported on this platform')
+      return
+    }
+
+    const { restore } = writeManagedMcpConfig(cwd, {
+      'acp-srv': { command: 'node', args: ['a.js'] }
+    })
+
+    assert.equal(readFileSync(path, 'utf-8'), original, 'user config untouched when backup fails')
+    restore()
+    assert.ok(existsSync(path), 'restore must not delete the user config')
+    assert.equal(readFileSync(path, 'utf-8'), original, 'user config intact after restore')
   } finally {
     rmSync(cwd, { recursive: true, force: true })
   }

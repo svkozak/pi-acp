@@ -60,7 +60,9 @@ Force capability advertising with:
 
 The merged `.pi/mcp.json` is restored to its original state when the session closes (a `.pi/mcp.json.pi-acp.bak` is kept until restore). If `pi-acp` exits abruptly the managed servers remain in `.pi/mcp.json` and can be removed manually.
 
-Server-originated MCP *notifications* (e.g. `notifications/progress`, `notifications/resources/updated`) are forwarded to pi. Server-originated *requests* (e.g. `sampling/createMessage`) are declined, since handling them would require pi's MCP client to also act as an MCP server.
+Server-originated MCP _notifications_ (e.g. `notifications/progress`, `notifications/resources/updated`) are forwarded to pi. Server-originated _requests_ (e.g. `sampling/createMessage`) are declined, since handling them would require pi's MCP client to also act as an MCP server.
+
+Bridge round-trips over the ACP channel are bounded by timeouts (`mcp/connect` 15s, `mcp/message` 5min to allow long-running tool calls, `mcp/disconnect` 5s), so an unresponsive client cannot leave pi's MCP requests hanging — pi receives a JSON-RPC error instead. A failure while setting up one server (e.g. its socket cannot be created) skips that server without affecting the others. On Windows the shim connects over a named pipe instead of a unix socket.
 
 ## Prerequisites
 
@@ -228,7 +230,7 @@ Project layout:
 ## Limitations
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
-- ACP-transport MCP servers are bridged to pi over the ACP channel (see [MCP support](#mcp-support)). Server-originated MCP *requests* (e.g. sampling) are not supported.
+- ACP-transport MCP servers are bridged to pi over the ACP channel (see [MCP support](#mcp-support)). Server-originated MCP _requests_ (e.g. sampling) are not supported.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~

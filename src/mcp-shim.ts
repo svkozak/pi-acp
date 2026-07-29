@@ -30,7 +30,7 @@ if (!SOCKET_PATH) {
   process.exit(1)
 }
 
-function pipe(streamA: NodeJS.ReadableStream, streamB: NodeJS.WritableStream): () => void {
+function pipe(streamA: NodeJS.ReadableStream, streamB: NodeJS.WritableStream): void {
   streamA.on('data', (chunk: Buffer | string) => {
     try {
       streamB.write(chunk)
@@ -38,13 +38,8 @@ function pipe(streamA: NodeJS.ReadableStream, streamB: NodeJS.WritableStream): (
       // ignore write errors; teardown will follow on close
     }
   })
-  const onClose = () => teardown()
-  streamA.on('end', onClose)
-  streamA.on('error', () => teardown())
-  return () => {
-    streamA.off('end', onClose)
-    streamA.off('error', onClose)
-  }
+  streamA.on('end', teardown)
+  streamA.on('error', teardown)
 }
 
 let teardownDone = false

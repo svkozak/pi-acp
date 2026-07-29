@@ -57,6 +57,43 @@ type ActiveConnection = {
   connected: boolean
 }
 
+/**
+ * Timeouts for ACP round-trips. Without these, an unresponsive client would
+ * leave pi's MCP requests pending forever (the shim has no protocol awareness
+ * and cannot fail them itself).
+ */
+export interface AcpMcpBridgeTimeouts {
+  /** `mcp/connect` — session setup, should be fast. */
+  connectMs: number
+  /** `mcp/message` requests — generous: MCP tool calls can be long-running. */
+  messageMs: number
+  /** `mcp/disconnect` — best-effort teardown. */
+  disconnectMs: number
+}
+
+const DEFAULT_TIMEOUTS: AcpMcpBridgeTimeouts = {
+  connectMs: 15_000,
+  messageMs: 300_000,
+  disconnectMs: 5_000
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    timer.unref?.()
+    promise.then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      err => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
 /** Path to the built shim script, resolved relative to this module. */
 function resolveShimPath(): string {
   const here = fileURLToPath(import.meta.url)
@@ -77,14 +114,16 @@ function resolveShimPath(): string {
 
 export class AcpMcpBridge {
   private readonly conn: AgentSideConnection
+  private readonly timeouts: AcpMcpBridgeTimeouts
   /** connectionId -> connection state. */
   private readonly connections = new Map<string, ActiveConnection>()
   /** socket server -> server context (acp info + socket path). */
   private readonly servers = new Map<Server, { info: AcpServerInfo; socketPath: string }>()
   private disposed = false
 
-  constructor(conn: AgentSideConnection) {
+  constructor(conn: AgentSideConnection, timeouts: Partial<AcpMcpBridgeTimeouts> = {}) {
     this.conn = conn
+    this.timeouts = { ...DEFAULT_TIMEOUTS, ...timeouts }
   }
 
   /**
@@ -149,7 +188,11 @@ export class AcpMcpBridge {
 
   private async connect(acpId: string, active: ActiveConnection): Promise<void> {
     try {
-      const res = (await this.conn.extMethod('mcp/connect', { acpId })) as { connectionId?: string } | undefined
+      const res = (await withTimeout(
+        this.conn.extMethod('mcp/connect', { acpId }),
+        this.timeouts.connectMs,
+        'mcp/connect'
+      )) as { connectionId?: string } | undefined
       if (res && typeof res.connectionId === 'string' && res.connectionId) {
         // Re-key under the client-assigned connection id.
         this.connections.delete(active.connectionId)
@@ -192,11 +235,15 @@ export class AcpMcpBridge {
     if (isRequest) {
       const id = msg.id
       try {
-        const result = (await this.conn.extMethod('mcp/message', {
-          connectionId: active.connectionId,
-          method: innerMethod,
-          params: innerParams ?? null
-        })) as unknown
+        const result = (await withTimeout(
+          this.conn.extMethod('mcp/message', {
+            connectionId: active.connectionId,
+            method: innerMethod,
+            params: innerParams ?? null
+          }),
+          this.timeouts.messageMs,
+          `mcp/message (${innerMethod})`
+        )) as unknown
         this.writeToShim(active, { jsonrpc: '2.0', id, result: result ?? null })
       } catch (err: any) {
         this.writeToShim(active, {
@@ -295,7 +342,11 @@ export class AcpMcpBridge {
 
   private async disconnect(active: ActiveConnection): Promise<void> {
     try {
-      await this.conn.extMethod('mcp/disconnect', { connectionId: active.connectionId })
+      await withTimeout(
+        this.conn.extMethod('mcp/disconnect', { connectionId: active.connectionId }),
+        this.timeouts.disconnectMs,
+        'mcp/disconnect'
+      )
     } catch {
       // best-effort
     }
@@ -309,17 +360,26 @@ export class AcpMcpBridge {
   private cleanupConnection(active: ActiveConnection): void {
     if (this.disposed) return
     this.connections.delete(active.connectionId)
-    // Notify the client that this connection is gone.
-    void this.conn.extNotification('mcp/disconnect', { connectionId: active.connectionId }).catch(() => {})
+    // Tell the client this connection is gone. Per the SDK schema,
+    // mcp/disconnect is a request (has a response), not a notification.
+    void withTimeout(
+      this.conn.extMethod('mcp/disconnect', { connectionId: active.connectionId }),
+      this.timeouts.disconnectMs,
+      'mcp/disconnect'
+    ).catch(() => {})
   }
 }
 
 function makeSocketPath(acpId: string): string {
   const safe = acpId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || randomUUID()
-  const name = `pi-acp-mcp-${safe}-${randomUUID().slice(0, 8)}.sock`
+  const name = `pi-acp-mcp-${safe}-${randomUUID().slice(0, 8)}`
+  // Windows has no unix domain sockets; net.Server.listen() needs a named pipe.
+  if (process.platform === 'win32') {
+    return `\\\\.\\pipe\\${name}`
+  }
   // Unix domain socket paths have a length limit (~104 chars on macOS). tmpdir
   // keeps us comfortably under that limit.
-  return join(tmpdir(), name)
+  return join(tmpdir(), `${name}.sock`)
 }
 
 function removePath(p: PathLike): Promise<void> {

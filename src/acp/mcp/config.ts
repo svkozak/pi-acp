@@ -137,13 +137,16 @@ export function writeManagedMcpConfig(
   // during this session) so repeated calls don't overwrite the backup with an
   // already-managed version.
   let backedUp = false
-  try {
-    if (existsSync(path) && !existsSync(backupPath)) {
+  if (existsSync(path) && !existsSync(backupPath)) {
+    try {
       copyFileSync(path, backupPath)
       backedUp = true
+    } catch {
+      // Without a backup we must NOT overwrite the user's file: restore() has
+      // no original to put back and would end up deleting the user's config.
+      // Skip MCP wiring for this session instead.
+      return { path, restore: () => {} }
     }
-  } catch {
-    // Best-effort backup; continue without it.
   }
 
   const merged: PiMcpConfig = {

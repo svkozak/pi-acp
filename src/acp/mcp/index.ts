@@ -42,22 +42,26 @@ export async function setupMcpServers(
   cwd: string,
   servers: McpServer[]
 ): Promise<McpSetupResult> {
-  const acpServers = servers.filter((s): s is Extract<McpServer, { type: 'acp' }> => 'type' in s && s.type === 'acp')
-
   let bridge: AcpMcpBridge | null = null
   const managed: Record<string, PiMcpServerConfig> = {}
 
   for (const server of servers) {
     if ('type' in server && server.type === 'acp') {
-      if (!bridge) bridge = new AcpMcpBridge(conn)
-      const shimEntry = await bridge.addServer({ name: server.name, acpId: server.id })
-      // Names must be unique within .pi/mcp.json; if an ACP server collides with
-      // a user-managed server name, the ACP one wins for this session (it's
-      // restored on dispose).
-      managed[server.name] = {
-        command: shimEntry.command,
-        args: shimEntry.args,
-        env: shimEntry.env
+      // Isolate per-server failures (e.g. socket listen errors): a broken
+      // ACP-transport server must not take down the wiring for the others.
+      try {
+        if (!bridge) bridge = new AcpMcpBridge(conn)
+        const shimEntry = await bridge.addServer({ name: server.name, acpId: server.id })
+        // Names must be unique within .pi/mcp.json; if an ACP server collides with
+        // a user-managed server name, the ACP one wins for this session (it's
+        // restored on dispose).
+        managed[server.name] = {
+          command: shimEntry.command,
+          args: shimEntry.args,
+          env: shimEntry.env
+        }
+      } catch {
+        // Skip this server; pi simply won't see it.
       }
     } else {
       const cfg = acpMcpServerToPiConfig(server)
@@ -65,7 +69,6 @@ export async function setupMcpServers(
     }
   }
 
-  void acpServers // (acpServers used implicitly via the loop above)
   const managedConfig: ManagedMcpConfig = writeManagedMcpConfig(cwd, managed)
 
   return {
