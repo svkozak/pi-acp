@@ -22,6 +22,7 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
 
   // first started, second+third queued
   assert.equal(proc.prompts.length, 1)
+  assert.equal(proc.steers.length, 0)
 
   await session.cancel()
 

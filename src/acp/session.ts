@@ -43,11 +43,9 @@ type PendingTurn = {
   reject: (err: unknown) => void
 }
 
-type QueuedTurn = {
+type TurnRequest = PendingTurn & {
   message: string
   images: unknown[]
-  resolve: (reason: StopReason) => void
-  reject: (err: unknown) => void
 }
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
@@ -271,9 +269,10 @@ export class PiAcpSession {
   // Applies to the currently running turn.
   private cancelRequested = false
 
-  // Current in-flight turn (if any). Additional prompts are queued.
+  // Current in-flight turn, prompts steered into it, and startup/settlement-race prompts queued after it.
   private pendingTurn: PendingTurn | null = null
-  private readonly turnQueue: QueuedTurn[] = []
+  private readonly steeredTurns: PendingTurn[] = []
+  private readonly turnQueue: TurnRequest[] = []
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
@@ -338,46 +337,49 @@ export class PiAcpSession {
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
+      const turn: TurnRequest = { message: expandedMessage, images, resolve, reject }
 
-      // If a turn is already running, enqueue.
       if (this.pendingTurn) {
-        this.turnQueue.push(queued)
-
-        // Best-effort: notify client that a prompt was queued.
-        // This doesn't work in Zed yet, needs to be revisited
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: {
-            type: 'text',
-            text: `Queued message (position ${this.turnQueue.length}).`
-          }
-        })
-
-        // Also publish queue depth via session info metadata.
-        // This also not visible in the client
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
-        })
-
+        if (this.inAgentLoop) {
+          const steeredTurn: PendingTurn = { resolve, reject }
+          this.steeredTurns.push(steeredTurn)
+          this.proc.steer(expandedMessage, images).catch(err => {
+            const index = this.steeredTurns.indexOf(steeredTurn)
+            if (index >= 0) this.steeredTurns.splice(index, 1)
+            reject(err)
+          })
+        } else {
+          this.turnQueue.push(turn)
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: `Queued message (position ${this.turnQueue.length}).`
+            }
+          })
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
+          })
+        }
         return
       }
 
-      // No turn is running; start immediately.
-      this.startTurn(queued)
+      this.startTurn(turn)
     })
 
     return turnPromise
   }
 
   async cancel(): Promise<void> {
-    // Cancel current and clear any queued prompts.
     this.cancelRequested = true
 
+    const steeredTurns = this.steeredTurns.splice(0, this.steeredTurns.length)
+    for (const turn of steeredTurns) turn.resolve('cancelled')
+
     if (this.turnQueue.length) {
-      const queued = this.turnQueue.splice(0, this.turnQueue.length)
-      for (const t of queued) t.resolve('cancelled')
+      const queuedTurns = this.turnQueue.splice(0, this.turnQueue.length)
+      for (const turn of queuedTurns) turn.resolve('cancelled')
 
       this.emit({
         sessionUpdate: 'agent_message_chunk',
@@ -470,13 +472,13 @@ export class PiAcpSession {
     this.bashOutputSnapshots.delete(toolCallId)
   }
 
-  private startTurn(t: QueuedTurn): void {
+  private startTurn(t: TurnRequest): void {
     this.cancelRequested = false
     this.inAgentLoop = false
 
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
 
-    // Publish queue depth (0 because we're starting the turn now).
+    // Publish queue depth (0 unless a prompt arrived during startup/settlement).
     this.emit({
       sessionUpdate: 'session_info_update',
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
@@ -491,18 +493,20 @@ export class PiAcpSession {
       void this.flushEmits().finally(() => {
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
         const authErr = maybeAuthRequiredError(err)
+        const turns = [this.pendingTurn, ...this.steeredTurns.splice(0, this.steeredTurns.length)].filter(
+          (turn): turn is PendingTurn => turn !== null
+        )
         if (authErr) {
-          this.pendingTurn?.reject(authErr)
+          for (const turn of turns) turn.reject(authErr)
         } else {
           const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
+          for (const turn of turns) turn.resolve(reason)
         }
 
         this.pendingTurn = null
         this.inAgentLoop = false
 
         // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
         this.emit({
           sessionUpdate: 'session_info_update',
           _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
@@ -833,11 +837,13 @@ export class PiAcpSession {
         // the ACP `session/prompt` request.
         void this.flushEmits().finally(() => {
           const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
+          const turns = [this.pendingTurn, ...this.steeredTurns.splice(0, this.steeredTurns.length)].filter(
+            (turn): turn is PendingTurn => turn !== null
+          )
+          for (const turn of turns) turn.resolve(reason)
           this.pendingTurn = null
           this.inAgentLoop = false
 
-          // Start next queued prompt, if any.
           const next = this.turnQueue.shift()
           if (next) {
             this.emit({
