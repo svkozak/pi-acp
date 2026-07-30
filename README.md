@@ -29,6 +29,41 @@ Expect some minor breaking changes.
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
+## MCP support
+
+`pi-acp` can advertise MCP capabilities to the ACP client and wire ACP-provided MCP servers through to pi when pi has MCP enabled:
+
+- MCP capabilities default to **disabled** for plain pi, because pi has no built-in MCP support.
+- Capabilities are advertised as enabled when `pi-mcp-adapter` is detected globally, or when you set `PI_ACP_ENABLE_MCP=true`.
+- **`http` and `sse`** transports are translated into [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) config entries and merged into the project-local `.pi/mcp.json` for the session.
+- **`stdio`** servers are passed through the same config mechanism.
+- **`acp`** transport ([MCP-over-ACP RFD](https://agentclientprotocol.com/rfds/mcp-over-acp)) is bridged: `pi-acp` spawns a local stdio shim that pi launches via pi-mcp-adapter, and relays messages between that shim and the ACP channel using `mcp/connect`, `mcp/message`, and `mcp/disconnect`.
+
+> **Requires [`pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter) to be installed in pi.** pi has no built-in MCP support; the adapter extension reads `.pi/mcp.json` and spawns/connects the servers. Install it with `pi install npm:pi-mcp-adapter`.
+
+Force capability advertising with:
+
+```json
+{
+  "agent_servers": {
+    "pi": {
+      "type": "custom",
+      "command": "npx",
+      "args": ["-y", "pi-acp"],
+      "env": {
+        "PI_ACP_ENABLE_MCP": "true"
+      }
+    }
+  }
+}
+```
+
+The merged `.pi/mcp.json` is restored to its original state when the session closes (a `.pi/mcp.json.pi-acp.bak` is kept until restore). If `pi-acp` exits abruptly the managed servers remain in `.pi/mcp.json` and can be removed manually.
+
+Server-originated MCP _notifications_ (e.g. `notifications/progress`, `notifications/resources/updated`) are forwarded to pi. Server-originated _requests_ (e.g. `sampling/createMessage`) are declined, since handling them would require pi's MCP client to also act as an MCP server.
+
+Bridge round-trips over the ACP channel are bounded by timeouts (`mcp/connect` 15s, `mcp/message` 5min to allow long-running tool calls, `mcp/disconnect` 5s), so an unresponsive client cannot leave pi's MCP requests hanging — pi receives a JSON-RPC error instead. A failure while setting up one server (e.g. its socket cannot be created) skips that server without affecting the others. On Windows the shim connects over a named pipe instead of a unix socket.
+
 ## Prerequisites
 
 Make sure pi is installed
@@ -195,7 +230,7 @@ Project layout:
 ## Limitations
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
-- MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
+- ACP-transport MCP servers are bridged to pi over the ACP channel (see [MCP support](#mcp-support)). Server-originated MCP _requests_ (e.g. sampling) are not supported.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~

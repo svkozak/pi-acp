@@ -24,7 +24,7 @@ import {
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, type PiAcpSession } from './session.js'
+import { SessionManager, safeSetupMcpServers, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
@@ -42,7 +42,7 @@ import {
 } from './translate/bash.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
-import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
+import { getAgentDir, getEnableSkillCommands, getMcpCapabilities, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
@@ -196,6 +196,9 @@ export class PiAcpAgent implements ACPAgent {
 
       const cwd = opts?.cwd ?? stored.cwd
 
+      // Wire ACP-provided MCP servers through to pi BEFORE spawning pi.
+      const mcpSetup = await safeSetupMcpServers(this.conn, cwd, opts?.mcpServers ?? [])
+
       let proc: PiRpcProcess
       try {
         proc = await PiRpcProcess.spawn({
@@ -204,6 +207,12 @@ export class PiAcpAgent implements ACPAgent {
           piCommand: process.env.PI_ACP_PI_COMMAND
         })
       } catch (e: any) {
+        try {
+          mcpSetup.restore()
+          await mcpSetup.bridge?.dispose()
+        } catch {
+          // ignore
+        }
         if (e?.name === 'PiRpcSpawnError') {
           throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
         }
@@ -216,7 +225,8 @@ export class PiAcpAgent implements ACPAgent {
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
         proc,
-        fileCommands
+        fileCommands,
+        mcpSetup
       })
 
       this.lastSessionCwd = cwd
@@ -253,7 +263,10 @@ export class PiAcpAgent implements ACPAgent {
       }),
       agentCapabilities: {
         loadSession: true,
-        mcpCapabilities: { http: false, sse: false },
+        // pi-acp can wire MCP servers through to pi, but plain pi has no MCP.
+        // Only advertise MCP when pi-mcp-adapter is detected or explicitly
+        // enabled with PI_ACP_ENABLE_MCP=true.
+        mcpCapabilities: getMcpCapabilities(),
         promptCapabilities: {
           image: true,
           audio: false,
@@ -279,7 +292,8 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
-    // Pi doesn't support mcpServers, but we accept and store.
+    // Wire ACP-provided MCP servers through to pi (see McpManager). The setup
+    // happens inside SessionManager.create() before pi is spawned.
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,
@@ -1194,6 +1208,54 @@ export class PiAcpAgent implements ACPAgent {
 
     const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
     return { configOptions }
+  }
+
+  /**
+   * Handle ACP extension methods we care about. Currently this routes inbound
+   * MCP-over-ACP messages (server-originated `mcp/message` requests and
+   * notifications) to the session bridge that owns the referenced connectionId.
+   */
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.routeInboundMcp(method, params, true) as Promise<Record<string, unknown>>
+  }
+
+  /** Handle inbound ACP extension notifications (e.g. server-originated MCP notifications). */
+  async extNotification(method: string, params: unknown): Promise<void> {
+    void (await this.routeInboundMcp(method, params, false))
+  }
+
+  private async routeInboundMcp(method: string, params: unknown, isRequest: boolean): Promise<unknown> {
+    if (method === 'mcp/message') {
+      const p = params as { connectionId?: string; method?: string; params?: unknown } | null | undefined
+      const connectionId = typeof p?.connectionId === 'string' ? p.connectionId : null
+      const innerMethod = typeof p?.method === 'string' ? p.method : ''
+      const innerParams = p?.params ?? undefined
+      if (!connectionId) return undefined
+
+      const bridge = this.sessions.findBridgeByConnectionId(connectionId)
+      if (!bridge) {
+        // No matching connection. Decline requests; ignore notifications.
+        if (isRequest) {
+          throw RequestError.invalidParams(`Unknown MCP-over-ACP connectionId: ${connectionId}`)
+        }
+        return undefined
+      }
+
+      const res = bridge.handleInbound(connectionId, innerMethod, innerParams, isRequest)
+      if (!res.handled) {
+        if (isRequest) {
+          throw RequestError.invalidParams(`Unknown MCP-over-ACP connectionId: ${connectionId}`)
+        }
+        return undefined
+      }
+      if (isRequest && res.error) {
+        throw Object.assign(new Error(res.error.message), { code: res.error.code })
+      }
+      return res.result
+    }
+
+    if (isRequest) throw RequestError.methodNotFound(method)
+    return undefined
   }
 }
 
