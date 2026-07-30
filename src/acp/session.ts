@@ -563,7 +563,7 @@ export class PiAcpSession {
                     }
                   })()
 
-            const locations = toToolCallLocations(rawInput, this.cwd)
+            const locations = ame.type === 'toolcall_end' ? toToolCallLocations(rawInput, this.cwd) : undefined
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
             const status = existingStatus ?? 'pending'
