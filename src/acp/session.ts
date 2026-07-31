@@ -836,6 +836,25 @@ export class PiAcpSession {
         break
       }
 
+      case 'session_info_changed': {
+        // The agent renamed the session in-process -- e.g. an extension tool
+        // such as `set_session_name` calling `pi.setSessionName()`, or the
+        // built-in `set_session_name` RPC command. Pi emits
+        // `session_info_changed` on the RPC event stream; forward it to the
+        // ACP client as a `session_info_update` carrying the new `title` so
+        // attached UIs (e.g. agent-shell) can refresh the session title /
+        // buffer name live. Mirrors the `/name` slash-command path in agent.ts.
+        const name = typeof (ev as any).name === 'string' ? (ev as any).name.trim() : ''
+        if (name) {
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            title: name,
+            updatedAt: new Date().toISOString()
+          })
+        }
+        break
+      }
+
       case 'agent_settled': {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
