@@ -52,9 +52,10 @@ test('PiAcpAgent: /name sets session display name adapter-side', async () => {
   assert.equal(res.stopReason, 'end_turn')
   assert.equal(proc.prompts.length, 0)
   assert.equal(setTo, 'My Session')
-  const info = conn.updates.find(u => (u as any).update?.sessionUpdate === 'session_info_update')
-  assert.equal((info as any)?.update?.title, 'My Session')
 
+  // The session_info_update title is no longer emitted directly by the /name
+  // handler — it flows through the session_info_changed event path instead.
+  // Verify only the confirmation message is emitted here.
   const last = conn.updates.at(-1)
   assert.match((last as any).update.content.text, /Session name set: My Session/)
 })
