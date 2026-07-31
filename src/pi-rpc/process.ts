@@ -81,6 +81,7 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private exited = false
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
@@ -115,15 +116,21 @@ export class PiRpcProcess {
     })
 
     child.on('exit', (code, signal) => {
+      this.exited = true
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
 
     child.on('error', err => {
+      this.exited = true
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
+  }
+
+  isAlive(): boolean {
+    return !this.exited
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
