@@ -130,6 +130,42 @@ You can add the environment variable in the Zed settings with:
   }
 ```
 
+### Forwarding arguments to pi
+
+Any command-line arguments that are not specific to `pi-acp` are forwarded to the underlying `pi` executable. This is useful for passing flags like `--model`, `--provider`, or extension's specific flags when starting a session.
+
+The following arguments are managed by `pi-acp` and will be stripped before forwarding:
+
+- `--mode`
+- `--session`
+- `--no-themes`
+- `--terminal-login`
+
+You can pass arguments directly:
+
+```bash
+pi-acp --model opencode-go/kimi-k2.6
+```
+
+Or use `--` to explicitly separate `pi-acp` arguments from `pi` arguments:
+
+```bash
+pi-acp --terminal-login -- --no-extensions --no-skills
+```
+
+In your ACP client configuration (e.g. Zed), add them to the `args` array:
+
+```json
+  "agent_servers": {
+    "pi": {
+      "type": "custom",
+      "command": "pi-acp",
+      "args": ["--model", "opencode-go/kimi-k2.6"],
+      "env": {}
+    }
+  }
+```
+
 ### Slash commands
 
 `pi-acp` supports slash commands:
