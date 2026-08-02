@@ -296,6 +296,38 @@ export class PiAcpSession {
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
 
+  // ---- Reasoning coalescing ----
+  // pi can stream a trailing reasoning delta AFTER its final answer has begun
+  // (inherited from the provider). The TUI swallows this because it renders a
+  // single merged thinking block; pi-acp was relaying raw delta order, so ACP
+  // clients (e.g. Zed) showed [thinking][text][thinking][text]. We hold the
+  // first text chunk briefly so a trailing thinking delta lands in the
+  // still-open thought block, mirroring the TUI. Tune via PI_ACP_THINK_HOLD_MS.
+  private readonly thoughtHoldMs = (() => {
+    const n = Number(process.env.PI_ACP_THINK_HOLD_MS)
+    return Number.isFinite(n) && n > 0 ? n : 200
+  })()
+  private thinkingSeen = false
+  private streamDirect = false
+  private holdBuf: string[] = []
+  private holdTimer: NodeJS.Timeout | null = null
+
+  private flushHeldText(): void {
+    if (this.holdTimer) {
+      clearTimeout(this.holdTimer)
+      this.holdTimer = null
+    }
+    const text = this.holdBuf.join('')
+    this.holdBuf = []
+    this.streamDirect = true
+    if (text) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text } satisfies ContentBlock
+      })
+    }
+  }
+
   constructor(opts: {
     sessionId: string
     cwd: string
@@ -474,6 +506,14 @@ export class PiAcpSession {
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
+    // Reset reasoning-coalescing state for the new turn.
+    this.thinkingSeen = false
+    this.streamDirect = false
+    this.holdBuf = []
+    if (this.holdTimer) {
+      clearTimeout(this.holdTimer)
+      this.holdTimer = null
+    }
 
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
 
@@ -522,24 +562,43 @@ export class PiAcpSession {
 
         // Stream assistant text.
         if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
-          this.emit({
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: ame.delta } satisfies ContentBlock
-          })
+          if (this.streamDirect || !this.thinkingSeen) {
+            if (!this.thinkingSeen) this.streamDirect = true
+            this.emit({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: ame.delta } satisfies ContentBlock
+            })
+          } else {
+            // Thinking was present this turn: hold the text briefly so any
+            // trailing reasoning delta joins the same (still-open) thought block.
+            this.holdBuf.push(ame.delta)
+            if (!this.holdTimer) {
+              this.holdTimer = setTimeout(() => this.flushHeldText(), this.thoughtHoldMs)
+            }
+          }
           break
         }
 
         if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string') {
+          this.thinkingSeen = true
           this.emit({
             sessionUpdate: 'agent_thought_chunk',
             content: { type: 'text', text: ame.delta } satisfies ContentBlock
           })
+          if (this.holdTimer) {
+            // Trailing reasoning while we're holding text: keep the thought block
+            // open and postpone the text flush so it absorbs into one block.
+            clearTimeout(this.holdTimer)
+            this.holdTimer = setTimeout(() => this.flushHeldText(), this.thoughtHoldMs)
+          }
           break
         }
 
         // Surface tool calls ASAP so clients (e.g. Zed) can show a tool-in-use/loading UI
         // while the model is still streaming tool call args.
         if (ame?.type === 'toolcall_start' || ame?.type === 'toolcall_delta' || ame?.type === 'toolcall_end') {
+          // Don't let held text fall after a tool call that closes the thought block.
+          this.flushHeldText()
           const toolCall =
             // pi sometimes includes the tool call directly on the event
             (ame as any)?.toolCall ??
@@ -611,6 +670,8 @@ export class PiAcpSession {
       }
 
       case 'tool_execution_start': {
+        // Flush any held text so it appears before the tool call, not after it.
+        this.flushHeldText()
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args

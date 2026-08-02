@@ -62,6 +62,54 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   })
 })
 
+test('PiAcpSession: coalesces trailing thinking into the same thought block (no text split)', async () => {
+  const prev = process.env.PI_ACP_THINK_HOLD_MS
+  process.env.PI_ACP_THINK_HOLD_MS = '8'
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  // Long thinking block.
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'think1' } })
+  // Answer begins... but text is held so a trailing thinking delta can join block 0.
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'There are ' } })
+  // Trailing reasoning tail after the answer has started.
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: ' reasoning' } })
+
+  await new Promise(r => setTimeout(r, 0))
+  // Two thought chunks streamed (block 0 stays open), NO message chunk yet.
+  const thoughts = conn.updates.filter(u => u.update.sessionUpdate === 'agent_thought_chunk')
+  const msgs = conn.updates.filter(u => u.update.sessionUpdate === 'agent_message_chunk')
+  assert.equal(thoughts.length, 2)
+  assert.equal(msgs.length, 0)
+  assert.deepEqual((thoughts[0]!.update as any).content.text, 'think1')
+  assert.deepEqual((thoughts[1]!.update as any).content.text, ' reasoning')
+
+  // After the hold window, held text flushes as a single message chunk.
+  await new Promise(r => setTimeout(r, 30))
+  const flushed = conn.updates.filter(u => u.update.sessionUpdate === 'agent_message_chunk')
+  assert.equal(flushed.length, 1)
+  assert.deepEqual((flushed[0]!.update as any).content.text, 'There are ')
+
+  // Subsequent text streams directly (no more coalescing needed).
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '3 r\'s' } })
+  await new Promise(r => setTimeout(r, 0))
+  const after = conn.updates.filter(u => u.update.sessionUpdate === 'agent_message_chunk')
+  assert.equal(after.length, 2)
+  assert.deepEqual((after[1]!.update as any).content.text, '3 r\'s')
+
+  if (prev === undefined) delete process.env.PI_ACP_THINK_HOLD_MS
+  else process.env.PI_ACP_THINK_HOLD_MS = prev
+})
+
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
