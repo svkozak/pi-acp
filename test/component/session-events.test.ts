@@ -62,9 +62,13 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   })
 })
 
-test('PiAcpSession: coalesces trailing thinking into the same thought block (no text split)', async () => {
+test('PiAcpSession: coalesces trailing thinking into the same thought block (no text split)', async t => {
   const prev = process.env.PI_ACP_THINK_HOLD_MS
   process.env.PI_ACP_THINK_HOLD_MS = '8'
+  t.after(() => {
+    if (prev === undefined) delete process.env.PI_ACP_THINK_HOLD_MS
+    else process.env.PI_ACP_THINK_HOLD_MS = prev
+  })
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -105,9 +109,38 @@ test('PiAcpSession: coalesces trailing thinking into the same thought block (no 
   const after = conn.updates.filter(u => u.update.sessionUpdate === 'agent_message_chunk')
   assert.equal(after.length, 2)
   assert.deepEqual((after[1]!.update as any).content.text, '3 r\'s')
+})
 
-  if (prev === undefined) delete process.env.PI_ACP_THINK_HOLD_MS
-  else process.env.PI_ACP_THINK_HOLD_MS = prev
+test('PiAcpSession: flushes held text when the turn settles before the hold timer fires', async t => {
+  const prev = process.env.PI_ACP_THINK_HOLD_MS
+  process.env.PI_ACP_THINK_HOLD_MS = '10000' // long hold so agent_settled wins the race
+  t.after(() => {
+    if (prev === undefined) delete process.env.PI_ACP_THINK_HOLD_MS
+    else process.env.PI_ACP_THINK_HOLD_MS = prev
+  })
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'think' } })
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'There are ' } })
+  // Hold timer is ~10s, so it won't fire; the turn settles first. The held text
+  // must still be flushed before completion, not dropped by the next startTurn.
+  proc.emit({ type: 'agent_settled' })
+
+  await new Promise(r => setTimeout(r, 30))
+
+  const msgs = conn.updates.filter(u => u.update.sessionUpdate === 'agent_message_chunk')
+  assert.equal(msgs.length, 1)
+  assert.deepEqual((msgs[0]!.update as any).content.text, 'There are ')
 })
 
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {

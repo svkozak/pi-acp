@@ -305,7 +305,10 @@ export class PiAcpSession {
   // still-open thought block, mirroring the TUI. Tune via PI_ACP_THINK_HOLD_MS.
   private readonly thoughtHoldMs = (() => {
     const n = Number(process.env.PI_ACP_THINK_HOLD_MS)
-    return Number.isFinite(n) && n > 0 ? n : 200
+    // n >= 0 so a literal 0 disables the hold (falls to a next-tick flush).
+    // ponytail: setTimeout(...,0) still buffers one macrotask tick; a true bypass
+    // would need a dedicated sentinel, add it if latency matters.
+    return Number.isFinite(n) && n >= 0 ? n : 200
   })()
   private thinkingSeen = false
   private streamDirect = false
@@ -529,6 +532,7 @@ export class PiAcpSession {
     this.proc.prompt(t.message, t.images).catch(err => {
       // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
+      this.flushHeldText()
       void this.flushEmits().finally(() => {
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
         const authErr = maybeAuthRequiredError(err)
@@ -898,6 +902,10 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
+        // Flush any held text before we deliver updates and resolve, so the
+        // buffered chunk isn't dropped if the turn settles before the hold timer
+        // fires (startTurn would otherwise discard holdBuf on the next turn).
+        this.flushHeldText()
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void this.flushEmits().finally(() => {
