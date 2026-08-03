@@ -88,6 +88,7 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
             { role: 'assistant', content: [{ type: 'text', text: 'Hi there!' }] }
           ]
         }),
+        getSessionStats: async () => ({ contextUsage: { tokens: 12_345, contextWindow: 200_000 } }),
         getAvailableModels: async () => ({ models: [] }),
         getState: async () => ({ thinkingLevel: 'medium' })
       } as any
@@ -104,6 +105,19 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
 
       assert.ok(texts.some(t => t.kind === 'user_message_chunk' && t.text === 'Hello'))
       assert.ok(texts.some(t => t.kind === 'agent_message_chunk' && t.text === 'Hi there!'))
+
+      // loadSession schedules the usage publish after returning (client must know the sessionId first).
+      assert.equal(
+        conn.updates.some(u => (u as any).update?.sessionUpdate === 'usage_update'),
+        false
+      )
+      await new Promise(r => setTimeout(r, 0))
+      await new Promise(r => setTimeout(r, 0))
+
+      assert.deepEqual(
+        conn.updates.filter(u => (u as any).update?.sessionUpdate === 'usage_update'),
+        [{ sessionId: 'sess-1', update: { sessionUpdate: 'usage_update', used: 12_345, size: 200_000 } }]
+      )
     } finally {
       PiRpcProcess.spawn = originalSpawn
     }

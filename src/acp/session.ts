@@ -11,7 +11,7 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
-import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
+import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent, type PiSessionStats } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -58,6 +58,21 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
+
+/**
+ * Map pi's `stats.contextUsage` to an ACP `usage_update`. Returns null whenever pi
+ * reports no trustworthy token count (e.g. `tokens: null` right after compaction) or
+ * the values are not usable integers.
+ */
+function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate | null {
+  const used = stats?.contextUsage?.tokens
+  const size = stats?.contextUsage?.contextWindow
+
+  if (typeof used !== 'number' || !Number.isSafeInteger(used) || used < 0) return null
+  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null
+
+  return { sessionUpdate: 'usage_update', used, size }
+}
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
@@ -415,6 +430,52 @@ export class PiAcpSession {
 
   private async flushEmits(): Promise<void> {
     await this.lastEmit
+  }
+
+  /**
+   * Best-effort: publish the real pi context-window occupancy as ACP `usage_update`.
+   * Queued updates are flushed even when the stats query fails or times out, so callers
+   * can await this before resolving `session/prompt`.
+   */
+  async publishContextUsage(): Promise<void> {
+    try {
+      // Older/stubbed pi processes may not expose the stats RPC at all.
+      // The request itself times out (see `PiRpcProcess.getSessionStats`).
+      if (typeof this.proc.getSessionStats === 'function') {
+        const update = toUsageUpdate(await this.proc.getSessionStats())
+        if (update) this.emit(update)
+      }
+    } catch {
+      // Context usage is auxiliary; never fail or delay the turn because of it.
+    }
+
+    await this.flushEmits()
+  }
+
+  private async settleTurn(): Promise<void> {
+    // Ensure all updates derived from pi events (plus the final usage update) are
+    // delivered before we resolve the ACP `session/prompt` request.
+    await this.publishContextUsage()
+
+    const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+    this.pendingTurn?.resolve(reason)
+    this.pendingTurn = null
+    this.inAgentLoop = false
+
+    // Start next queued prompt, if any.
+    const next = this.turnQueue.shift()
+    if (next) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+      })
+      this.startTurn(next)
+    } else {
+      this.emit({
+        sessionUpdate: 'session_info_update',
+        _meta: { piAcp: { queueDepth: 0, running: false } }
+      })
+    }
   }
 
   private emitBashToolCall(params: {
@@ -837,29 +898,7 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
-        // Ensure all updates derived from pi events are delivered before we resolve
-        // the ACP `session/prompt` request.
-        void this.flushEmits().finally(() => {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
-          this.pendingTurn = null
-          this.inAgentLoop = false
-
-          // Start next queued prompt, if any.
-          const next = this.turnQueue.shift()
-          if (next) {
-            this.emit({
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
-            })
-            this.startTurn(next)
-          } else {
-            this.emit({
-              sessionUpdate: 'session_info_update',
-              _meta: { piAcp: { queueDepth: 0, running: false } }
-            })
-          }
-        })
+        void this.settleTurn()
         break
       }
 

@@ -121,6 +121,9 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
         setModelCalls.push({ provider, modelId })
         state.model = { provider, id: modelId }
       }
+    },
+    async publishContextUsage() {
+      // Context usage publishing is covered in test/unit/context-usage.test.ts.
     }
   }
 

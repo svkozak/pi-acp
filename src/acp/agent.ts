@@ -397,6 +397,10 @@ export class PiAcpAgent implements ACPAgent {
     // So we must send this *after* the session/new response has been delivered.
     setTimeout(() => {
       void (async () => {
+        // Publish real context usage now that the client knows the sessionId (clients ignore
+        // notifications for unknown sessions), so the window size is correct before the first prompt.
+        await session.publishContextUsage()
+
         try {
           const pi = (await session.proc.getCommands()) as any
           const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
@@ -476,7 +480,7 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       if (cmd === 'session') {
-        const stats = (await session.proc.getSessionStats()) as any
+        const stats = await session.proc.getSessionStats()
 
         const lines: string[] = []
         if (stats?.sessionId) lines.push(`Session: ${stats.sessionId}`)
@@ -1076,6 +1080,8 @@ export class PiAcpAgent implements ACPAgent {
     // Advertise slash commands after the response so the client knows the session exists.
     setTimeout(() => {
       void (async () => {
+        await session.publishContextUsage()
+
         try {
           const pi = (await proc.getCommands()) as any
           const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
@@ -1138,6 +1144,7 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
     await setSessionModel(session.proc, params.modelId)
     await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    await session.publishContextUsage()
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1167,6 +1174,7 @@ export class PiAcpAgent implements ACPAgent {
   async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
     const session = await this.restoreSession(params.sessionId)
     const configId = String(params.configId)
+    let modelChanged = false
 
     if (typeof params.value !== 'string') {
       throw RequestError.invalidParams(`Expected string value for config option: ${configId}`)
@@ -1174,6 +1182,7 @@ export class PiAcpAgent implements ACPAgent {
 
     if (configId === MODEL_CONFIG_ID) {
       await setSessionModel(session.proc, params.value)
+      modelChanged = true
     } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
       if (!isThinkingLevel(params.value)) {
         throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
@@ -1193,6 +1202,8 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    // A different model can mean a different context window; refresh it immediately.
+    if (modelChanged) await session.publishContextUsage()
     return { configOptions }
   }
 }

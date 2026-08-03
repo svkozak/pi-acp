@@ -1,5 +1,5 @@
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
-import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
+import type { PiRpcEvent, PiSessionStats } from '../../src/pi-rpc/process.js'
 
 type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
@@ -29,6 +29,11 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  getSessionStatsCount = 0
+
+  sessionStats: PiSessionStats = {}
+  /** When set, `getSessionStats()` rejects with this error. */
+  sessionStatsError: unknown = null
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -63,6 +68,12 @@ export class FakePiRpcProcess {
 
   async getMessages(): Promise<any> {
     return { messages: [] }
+  }
+
+  async getSessionStats(): Promise<PiSessionStats> {
+    this.getSessionStatsCount += 1
+    if (this.sessionStatsError) throw this.sessionStatsError
+    return this.sessionStats
   }
 }
 
