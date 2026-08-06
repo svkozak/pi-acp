@@ -114,6 +114,7 @@ Point your ACP client to the built `dist/index.js`:
 - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
+- `PI_ACP_CHECK_FOR_UPDATES=false` skips the startup check for newer pi versions. Unset, `true`, and any other value keep the update check enabled.
 
 You can add the environment variable in the Zed settings with:
 
