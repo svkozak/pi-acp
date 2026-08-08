@@ -18,13 +18,15 @@ import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
   bashExitCode,
+  bashMaxOutputLines,
   bashOutputDelta,
   bashResultText,
   bashTerminalContent,
   bashTerminalExitMeta,
   bashTerminalInfoMeta,
   bashTerminalOutputMeta,
-  isBashTool
+  isBashTool,
+  truncateToLastLines
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
 
@@ -139,12 +141,87 @@ function getEditOldTexts(args: unknown): string[] {
   return oldTexts
 }
 
-function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
+export function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
   const path = getToolPath(args)
   if (!path) return undefined
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
+}
+
+export const PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES = 'PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES'
+
+function toDisplayPath(path: string, cwd: string): string {
+  const resolved = isAbsolute(path) ? path : resolvePath(cwd, path)
+  return resolved.startsWith(cwd + '/') ? resolved.slice(cwd.length + 1) : resolved
+}
+
+function descriptiveToolTitlesEnabled(): boolean {
+  return process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES === 'true'
+}
+
+export function toToolTitle(toolName: string, args: unknown, cwd: string): string {
+  const lower = toolName.toLowerCase()
+
+  if (lower === 'bash') {
+    return bashCommand(args) ?? toolName
+  }
+
+  if (!descriptiveToolTitlesEnabled()) {
+    return toolName
+  }
+
+  const path = getToolPath(args)
+  const displayPath = path ? toDisplayPath(path, cwd) : undefined
+
+  if (lower === 'read') {
+    const record = args as { offset?: unknown; limit?: unknown } | null | undefined
+    const offset = typeof record?.offset === 'number' ? record.offset : undefined
+    const limit = typeof record?.limit === 'number' && record.limit > 0 ? record.limit : undefined
+    let range = ''
+    if (offset !== undefined && limit !== undefined) range = ` (${offset} - ${offset + limit - 1})`
+    else if (offset !== undefined) range = ` (from line ${offset})`
+    return displayPath ? `Read ${displayPath}${range}` : 'Read'
+  }
+
+  if (lower === 'write') {
+    return displayPath ? `Write ${displayPath}` : 'Write'
+  }
+
+  if (lower === 'edit') {
+    return displayPath ? `Edit ${displayPath}` : 'Edit'
+  }
+
+  return toolName
+}
+
+// Reconstruct structured ACP diff content for historic edit/write tool results.
+// Unlike the live path (which snapshots pre-mutation file contents), replay
+// only has the tool args: edit carries {oldText,newText} snippets, write carries
+// the full new content. Pre-mutation contents are unrecoverable, so historic
+// writes render as new-file diffs.
+export function toReplayDiffContent(toolName: string, args: unknown): ToolCallContent[] | undefined {
+  const lower = toolName.toLowerCase()
+  const path = getToolPath(args)
+  if (!path) return undefined
+
+  if (lower === 'write') {
+    const content = (args as { content?: unknown } | null | undefined)?.content
+    if (typeof content === 'string') {
+      return [{ type: 'diff', path, oldText: null, newText: content }]
+    }
+    return undefined
+  }
+
+  if (lower === 'edit') {
+    const edits = getParsedEdits(args)
+    if (edits.length) {
+      return edits.map(edit => ({ type: 'diff', path, oldText: edit.oldText, newText: edit.newText }))
+    }
+    return undefined
+  }
+
+  return undefined
 }
 
 export class SessionManager {
@@ -291,6 +368,7 @@ export class PiAcpSession {
   private fileMutationToolCallIds = new Set<string>()
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
+  private bashRawInputs = new Map<string, unknown>()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -427,6 +505,7 @@ export class PiAcpSession {
     includeTerminal: boolean
   }): void {
     this.bashToolCallIds.add(params.toolCallId)
+    this.bashRawInputs.set(params.toolCallId, params.args)
     this.emit({
       sessionUpdate: params.sessionUpdate,
       toolCallId: params.toolCallId,
@@ -434,6 +513,7 @@ export class PiAcpSession {
       kind: 'execute',
       status: params.status,
       locations: params.locations,
+      rawInput: params.args,
       ...(params.includeTerminal ? { content: bashTerminalContent(params.toolCallId) } : {}),
       ...(params.includeTerminal ? { _meta: bashTerminalInfoMeta(params.toolCallId, this.cwd) } : {})
     })
@@ -446,14 +526,39 @@ export class PiAcpSession {
     isError?: boolean
   }): void {
     const text = bashResultText(params.result)
+    const rawInput = this.bashRawInputs.get(params.toolCallId)
+    const maxLines = bashMaxOutputLines()
+
+    if (maxLines != null) {
+      // Tail-truncate mode: buffer output and only emit the final tail on
+      // completion. ACP terminal_output is append-only, so we cannot stream
+      // live and later hide earlier lines.
+      if (params.status === 'completed' || params.status === 'failed') {
+        const displayText = truncateToLastLines(text, maxLines)
+        this.emit({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: params.toolCallId,
+          status: params.status,
+          rawInput,
+          rawOutput: params.result,
+          _meta: {
+            ...(displayText ? bashTerminalOutputMeta(params.toolCallId, displayText) : {}),
+            ...bashTerminalExitMeta(params.toolCallId, bashExitCode(params.result, Boolean(params.isError)))
+          }
+        })
+      }
+      return
+    }
+
     const previous = this.bashOutputSnapshots.get(params.toolCallId) ?? ''
     const delta = bashOutputDelta(previous, text)
     this.bashOutputSnapshots.set(params.toolCallId, text)
-
     this.emit({
       sessionUpdate: 'tool_call_update',
       toolCallId: params.toolCallId,
       status: params.status,
+      rawInput,
+      ...(params.status === 'completed' || params.status === 'failed' ? { rawOutput: params.result } : {}),
       _meta: {
         ...(delta ? bashTerminalOutputMeta(params.toolCallId, delta) : {}),
         ...(params.status === 'completed' || params.status === 'failed'
@@ -469,6 +574,7 @@ export class PiAcpSession {
     this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
+    this.bashRawInputs.delete(toolCallId)
   }
 
   private startTurn(t: QueuedTurn): void {
@@ -563,12 +669,12 @@ export class PiAcpSession {
                     }
                   })()
 
-            const locations = toToolCallLocations(rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
             const status = existingStatus ?? 'pending'
 
             if (isBashTool(toolName)) {
+              const locations = toToolCallLocations(rawInput, this.cwd)
               if (!existingStatus) this.currentToolCalls.set(toolCallId, 'pending')
               this.emitBashToolCall({
                 sessionUpdate: existingStatus ? 'tool_call_update' : 'tool_call',
@@ -587,17 +693,18 @@ export class PiAcpSession {
                 title: toolName,
                 kind: toToolKind(toolName),
                 status,
-                locations,
+                locations: [],
                 rawInput
               })
             } else {
               // Best-effort: keep rawInput updated while args are streaming.
-              // Keep the existing status (pending or in_progress).
+              // Don't emit locations here because pi streams partial args and
+              // partial paths (e.g. /tmp -> /tmp/test -> ...) confuse clients
+              // like Zed. The final locations are sent at tool_execution_start.
               this.emit({
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
                 status,
-                locations,
                 rawInput
               })
             }
@@ -659,13 +766,15 @@ export class PiAcpSession {
 
         const locations = toToolCallLocations(args, this.cwd, line)
 
+        const title = toToolTitle(toolName, args, this.cwd)
+
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, 'in_progress')
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
+            title,
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
@@ -676,6 +785,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
+            title,
             status: 'in_progress',
             locations,
             rawInput: args
