@@ -356,8 +356,9 @@ export class PiAcpSession {
   // and clients may hide progress if we ever downgrade back to `pending`.
   private currentToolCalls = new Map<string, 'pending' | 'in_progress'>()
 
-  // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
-  // The overall agent loop completes when `agent_end` is emitted.
+  // pi can emit multiple `turn_end` and `agent_end` events for a single user prompt
+  // when retry, compaction, or queued continuations run. The session-level prompt
+  // completes only when `agent_settled` is emitted.
   private inAgentLoop = false
 
   // For ACP diff support: capture file contents before edit/write mutations,
@@ -589,10 +590,10 @@ export class PiAcpSession {
     })
 
     // Kick off pi, but completion is determined by pi events, not the RPC response.
-    // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
-    // The full prompt is finished when we see `agent_end`.
+    // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
+    // continuations may emit multiple `agent_end` events before `agent_settled`.
     this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
+      // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
       void this.flushEmits().finally(() => {
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
@@ -934,11 +935,18 @@ export class PiAcpSession {
 
       case 'turn_end': {
         // pi uses `turn_end` for sub-steps (e.g. tool_use) and will often start another turn.
-        // Do NOT resolve the ACP `session/prompt` here; wait for `agent_end`.
+        // Do NOT resolve the ACP `session/prompt` here; wait for `agent_settled`.
         break
       }
 
       case 'agent_end': {
+        // One low-level run ended. Pi may still retry, compact, or process a queued
+        // continuation, so keep the ACP turn open until `agent_settled`.
+        this.inAgentLoop = false
+        break
+      }
+
+      case 'agent_settled': {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void this.flushEmits().finally(() => {
@@ -1002,7 +1010,8 @@ export class PiAcpSession {
     if (method === 'notify') {
       this.emit({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock
+        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock,
+        _meta: { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
       })
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return

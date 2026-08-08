@@ -38,7 +38,7 @@ npm install -g @earendil-works/pi-coding-agent
 ```
 
 - Node.js 22+
-- `pi` installed and available on your `PATH` (the adapter runs the `pi` executable)
+- `pi` v0.80.4+ installed and available on your `PATH` (the adapter runs the `pi` executable)
 - Configure `pi` separately for your model providers/API keys
 
 ## Install
@@ -160,7 +160,7 @@ Loaded from:
 
 Other built-in commands:
 
-- `/model` - maps to model selector in Zed
+- `/model` - not implemented (use the model selector UI in Zed)
 - `/thinking` - maps to 'mode' selector in Zed
 - `/clear` - not implemented (use ACP client 'new' command)
 

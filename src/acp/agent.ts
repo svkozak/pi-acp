@@ -19,7 +19,9 @@ import {
   type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
-  type StopReason
+  type StopReason,
+  type DeleteSessionRequest,
+  type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession, toToolCallLocations, toReplayDiffContent, toToolTitle } from './session.js'
@@ -261,7 +263,8 @@ export class PiAcpAgent implements ACPAgent {
         sessionCapabilities: {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
-          list: {}
+          list: {},
+          delete: {}
         }
       }
     }
@@ -1126,6 +1129,32 @@ export class PiAcpAgent implements ACPAgent {
     return response
   }
 
+  async deleteSession(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
+    const stored = this.store.get(params.sessionId)
+    const piSession = findPiSession(params.sessionId)
+
+    // Per ACP session/delete semantics, deleting a session that does not
+    // exist (or is already gone) should succeed idempotently.
+    // https://agentclientprotocol.com/protocol/v2/session-delete#semantics
+    if (!stored && !piSession) {
+      return {}
+    }
+
+    const sessionFile = stored?.sessionFile ?? piSession?.sessionFile
+
+    if (sessionFile) {
+      try {
+        if (existsSync(sessionFile)) unlinkSync(sessionFile)
+      } catch {
+        // best-effort cleanup
+      }
+    }
+
+    this.store.delete(params.sessionId)
+
+    return {}
+  }
+
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
     const session = await this.restoreSession(params.sessionId)
     await setSessionModel(session.proc, params.modelId)
@@ -1604,22 +1633,23 @@ function buildStartupInfo(opts: {
     // ignore
   }
 
-  // Also show npm packages from pi settings (best-effort)
-  try {
-    const settingsPath = join(process.env.HOME ?? '', '.pi', 'agent', 'settings.json')
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as any
-    const pkgs: string[] = Array.isArray(settings?.packages) ? settings.packages : []
-    for (const pkg of pkgs) {
-      const s = String(pkg)
-      if (s.startsWith('npm:')) {
-        // Render a two-line bullet structure using markdown indentation.
-        extItems.push(`${s}\n  - index.ts`)
-      } else {
-        extItems.push(s)
+  // Also show npm packages from pi settings (global + project)
+  const settingsPaths = [join(getAgentDir(), 'settings.json'), join(opts.cwd, '.pi', 'settings.json')]
+  for (const settingsPath of settingsPaths) {
+    try {
+      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as any
+      const pkgs: string[] = Array.isArray(settings?.packages) ? settings.packages : []
+      for (const pkg of pkgs) {
+        const s = String(pkg)
+        if (s.startsWith('npm:')) {
+          extItems.push(`${s}\n  - index.ts`)
+        } else {
+          extItems.push(s)
+        }
       }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
 
   addSection('Extensions', extItems)

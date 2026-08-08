@@ -719,7 +719,7 @@ test('PiAcpSession: omits edit tool line when oldText matches multiple times', a
   assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: filePath }])
 })
 
-test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
+test('PiAcpSession: prompt stays open through retry runs until agent_settled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -732,10 +732,25 @@ test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
     fileCommands: []
   })
 
-  const p = session.prompt('hello')
+  let resolved = false
+  const p = session.prompt('hello').then(reason => {
+    resolved = true
+    return reason
+  })
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 2000 })
+  proc.emit({ type: 'agent_end', willRetry: true })
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(resolved, false)
+
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_end', willRetry: false })
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(resolved, false)
+
+  proc.emit({ type: 'agent_settled' })
   const reason = await p
   assert.equal(reason, 'end_turn')
 })
@@ -775,6 +790,7 @@ test('PiAcpSession: does not re-emit startup info on first prompt after it was a
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const reason = await p
   assert.equal(reason, 'end_turn')
@@ -798,13 +814,14 @@ test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   const reason = await p
 
   assert.equal(proc.abortCount, 1)
   assert.equal(reason, 'cancelled')
 })
 
-test('PiAcpSession: queues concurrent prompt and starts it after agent_end', async () => {
+test('PiAcpSession: queues concurrent prompt and starts it after agent_settled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -826,6 +843,7 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r1 = await first
   assert.equal(r1, 'end_turn')
@@ -836,6 +854,7 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r2 = await second
   assert.equal(r2, 'end_turn')
@@ -863,6 +882,7 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r1 = await first
   const r2 = await second
@@ -898,7 +918,68 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const reason = await p
   assert.equal(reason, 'end_turn')
+})
+
+test('PiAcpSession: tags extension notify chunks with severity in _meta', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'n1',
+    method: 'notify',
+    message: 'MCP: connection failed',
+    notifyType: 'error'
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.deepEqual(conn.updates[0]!.update, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'MCP: connection failed' },
+    _meta: { piAcp: { notify: { level: 'error' } } }
+  })
+  assert.deepEqual(proc.extensionUiResponses[0], { id: 'n1', cancelled: true })
+})
+
+test('PiAcpSession: defaults notify severity to info when notifyType is absent', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'n2',
+    method: 'notify',
+    message: 'heads up'
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.deepEqual((conn.updates[0]!.update as any)._meta, {
+    piAcp: { notify: { level: 'info' } }
+  })
 })
