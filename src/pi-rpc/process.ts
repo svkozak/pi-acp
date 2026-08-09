@@ -14,6 +14,13 @@ export class PiRpcSpawnError extends Error {
   }
 }
 
+export class PiRpcTimeoutError extends Error {
+  constructor(command: string, timeoutMs: number) {
+    super(`pi RPC request timed out after ${timeoutMs}ms: ${command}`)
+    this.name = 'PiRpcTimeoutError'
+  }
+}
+
 const ESC = String.fromCharCode(0x1b)
 const CSI = String.fromCharCode(0x9b)
 
@@ -21,6 +28,11 @@ const ANSI_ESCAPE_REGEX = new RegExp(
   `[${ESC}${CSI}][[\\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]`,
   'g'
 )
+const RPC_REQUEST_TIMEOUT_MS = 30_000
+const RPC_STATE_PROBE_TIMEOUT_MS = 5_000
+const RPC_PROMPT_IDLE_TIMEOUT_MS = 120_000
+const RPC_LONG_REQUEST_TIMEOUT_MS = 10 * 60_000
+const RPC_KILL_GRACE_MS = 1_000
 
 function stripAnsi(s: string): string {
   // Basic ANSI escape stripping (colors, cursor movement, etc.)
@@ -79,10 +91,17 @@ type SpawnParams = {
 export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
+  private readonly pendingExtensionUiRequests = new Set<string>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private terminalError: Error | null = null
+  private agentStartSequence = 0
 
-  private constructor(child: ChildProcessWithoutNullStreams) {
+  private constructor(
+    child: ChildProcessWithoutNullStreams,
+    private readonly requestTimeoutMs = RPC_REQUEST_TIMEOUT_MS,
+    private readonly promptIdleTimeoutMs = RPC_PROMPT_IDLE_TIMEOUT_MS
+  ) {
     this.child = child
 
     const rl = readline.createInterface({ input: child.stdout })
@@ -101,27 +120,29 @@ export class PiRpcProcess {
 
       if (msg?.type === 'response') {
         const id = typeof msg.id === 'string' ? msg.id : undefined
-        if (id) {
-          const pending = this.pending.get(id)
-          if (pending) {
-            this.pending.delete(id)
-            pending.resolve(msg as PiRpcResponse)
-            return
-          }
-        }
+        if (id) this.pending.get(id)?.resolve(msg as PiRpcResponse)
+        return
       }
+
+      if (msg?.type === 'extension_ui_request' && typeof msg.id === 'string') {
+        this.pendingExtensionUiRequests.add(msg.id)
+      }
+      if (msg?.type === 'agent_start') this.agentStartSequence += 1
 
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
     })
 
     child.on('exit', (code, signal) => {
-      const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
-      for (const [, p] of this.pending) p.reject(err)
+      this.terminalError ??= new Error(`pi process exited (code=${code}, signal=${signal})`)
+      this.pendingExtensionUiRequests.clear()
+      for (const p of [...this.pending.values()]) p.reject(this.terminalError)
       this.pending.clear()
     })
 
     child.on('error', err => {
-      for (const [, p] of this.pending) p.reject(err)
+      this.terminalError ??= err
+      this.pendingExtensionUiRequests.clear()
+      for (const p of [...this.pending.values()]) p.reject(this.terminalError)
       this.pending.clear()
     })
   }
@@ -213,12 +234,18 @@ export class PiRpcProcess {
   }
 
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
-    if (this.child.killed) return
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return
     try {
       this.child.kill(signal as any)
     } catch {
       // ignore
     }
+  }
+
+  private terminate(): void {
+    this.dispose()
+    const timer = setTimeout(() => this.dispose('SIGKILL'), RPC_KILL_GRACE_MS)
+    timer.unref()
   }
 
   /**
@@ -274,7 +301,7 @@ export class PiRpcProcess {
   }
 
   async compact(customInstructions?: string): Promise<unknown> {
-    const res = await this.request({ type: 'compact', customInstructions })
+    const res = await this.request({ type: 'compact', customInstructions }, RPC_LONG_REQUEST_TIMEOUT_MS)
     if (!res.success) throw new Error(`pi compact failed: ${res.error ?? JSON.stringify(res.data)}`)
     return res.data
   }
@@ -320,22 +347,101 @@ export class PiRpcProcess {
   }
 
   async sendExtensionUiResponse(response: PiExtensionUiResponse): Promise<void> {
+    this.pendingExtensionUiRequests.delete(response.id)
     await this.writeLine(`${JSON.stringify({ type: 'extension_ui_response', ...response })}\n`)
   }
 
-  private request(cmd: PiRpcCommand): Promise<PiRpcResponse> {
+  private request(cmd: PiRpcCommand, timeoutMs = this.requestTimeoutMs): Promise<PiRpcResponse> {
+    if (this.terminalError) return Promise.reject(this.terminalError)
+
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
-
     const line = `${JSON.stringify(withId)}\n`
+    const startedAt = Date.now()
+    const agentStartSequence = this.agentStartSequence
 
     return new Promise<PiRpcResponse>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
+      let timer: ReturnType<typeof setTimeout> | undefined
 
-      void this.writeLine(line).catch(error => {
-        this.pending.delete(id)
-        reject(error)
-      })
+      const finish = (settle: () => void) => {
+        if (!this.pending.delete(id)) return
+        if (timer) clearTimeout(timer)
+        settle()
+      }
+      const finishResolve = (response: PiRpcResponse) => finish(() => resolve(response))
+      const finishReject = (error: unknown) => finish(() => reject(error))
+      const timeoutError = () =>
+        new PiRpcTimeoutError(cmd.type, cmd.type === 'prompt' ? Date.now() - startedAt : timeoutMs)
+
+      const armTimeout = () => {
+        timer = setTimeout(() => void handleTimeout(), timeoutMs)
+      }
+
+      const handleTimeout = async () => {
+        timer = undefined
+        if (!this.pending.has(id)) return
+
+        if (cmd.type === 'prompt') {
+          if (this.agentStartSequence !== agentStartSequence) {
+            finishResolve({ type: 'response', id, command: 'prompt', success: true })
+            return
+          }
+
+          if (this.pendingExtensionUiRequests.size > 0 && Date.now() - startedAt < RPC_LONG_REQUEST_TIMEOUT_MS) {
+            armTimeout()
+            return
+          }
+
+          try {
+            const probe = await this.request(
+              { type: 'get_state' },
+              Math.min(this.requestTimeoutMs, RPC_STATE_PROBE_TIMEOUT_MS)
+            )
+            if (!this.pending.has(id)) return
+
+            const state = probe.success && probe.data && typeof probe.data === 'object' ? probe.data : null
+            if (
+              (state as { isStreaming?: unknown } | null)?.isStreaming === true ||
+              this.agentStartSequence !== agentStartSequence
+            ) {
+              finishResolve({ type: 'response', id, command: 'prompt', success: true })
+              return
+            }
+
+            const elapsedMs = Date.now() - startedAt
+            if (
+              ((state as { isCompacting?: unknown } | null)?.isCompacting === true &&
+                elapsedMs < RPC_LONG_REQUEST_TIMEOUT_MS) ||
+              elapsedMs < this.promptIdleTimeoutMs
+            ) {
+              armTimeout()
+              return
+            }
+          } catch {
+            if (!this.pending.has(id)) return
+            if (this.agentStartSequence !== agentStartSequence) {
+              finishResolve({ type: 'response', id, command: 'prompt', success: true })
+              return
+            }
+            if (Date.now() - startedAt < this.promptIdleTimeoutMs) {
+              armTimeout()
+              return
+            }
+          }
+
+          const error = timeoutError()
+          this.terminalError = error
+          finishReject(error)
+          this.terminate()
+          return
+        }
+
+        finishReject(timeoutError())
+      }
+
+      this.pending.set(id, { resolve: finishResolve, reject: finishReject })
+      armTimeout()
+      void this.writeLine(line).catch(finishReject)
     })
   }
 
