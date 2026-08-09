@@ -43,6 +43,7 @@
     "test": "node --import tsx --test test/**/*.test.ts",
     "smoke": "node scripts/smoke-acp.mjs",
     "prepack": "npm run build",
+    "prepare": "bun run build",
     "prepublishOnly": "npm run test && npm run build"
   },
   "dependencies": {

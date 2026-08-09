@@ -10,6 +10,11 @@ export class FakeAgentSideConnection {
     outcome: { outcome: 'selected', optionId: 'allow' }
   }
 
+  // elicitation (unstable) spy
+  readonly elicitationRequests: unknown[] = []
+  elicitationResponse: any = { action: 'accept', content: { value: 'my answer' } }
+  elicitationError: Error | null = null
+
   async sessionUpdate(msg: SessionUpdateMsg): Promise<void> {
     this.updates.push(msg)
   }
@@ -19,6 +24,12 @@ export class FakeAgentSideConnection {
   ): Promise<{ outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }> {
     this.permissionRequests.push(params)
     return this.nextPermissionResponse
+  }
+
+  async unstable_createElicitation(params: any): Promise<any> {
+    this.elicitationRequests.push(params)
+    if (this.elicitationError) throw this.elicitationError
+    return this.elicitationResponse
   }
 }
 
