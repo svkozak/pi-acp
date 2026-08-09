@@ -713,6 +713,36 @@ test('PiAcpSession: does not re-emit startup info on first prompt after it was a
   assert.equal(reason, 'end_turn')
 })
 
+test('PiAcpSession: prompt ACK failure rejects the active turn and drains queued prompts', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  let rejectPrompt: ((error: Error) => void) | undefined
+  proc.prompt = async (message: string, attachments: unknown[] = []) => {
+    proc.prompts.push({ message, attachments })
+    await new Promise<void>((_resolve, reject) => {
+      rejectPrompt = reject
+    })
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const first = session.prompt('one')
+  const second = session.prompt('two')
+  rejectPrompt?.(new Error('prompt ACK timed out'))
+
+  await assert.rejects(() => first, /prompt ACK timed out/)
+  await assert.rejects(() => second, /prompt ACK timed out/)
+  assert.equal(proc.prompts.length, 1)
+  assert.equal((conn.updates.at(-1)?.update as any)._meta.piAcp.queueDepth, 0)
+})
+
 test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
