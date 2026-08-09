@@ -19,7 +19,6 @@ import {
   type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
-  type StopReason,
   type DeleteSessionRequest,
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
@@ -115,6 +114,23 @@ function mergeCommands(a: AvailableCommand[], b: AvailableCommand[]): AvailableC
   }
 
   return out
+}
+
+async function loadAvailableCommands(
+  proc: Pick<PiRpcProcess, 'getCommands'>,
+  fileCommands: ReturnType<typeof loadSlashCommands>,
+  enableSkillCommands: boolean
+): Promise<AvailableCommand[]> {
+  try {
+    const pi = await proc.getCommands()
+    const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
+      enableSkillCommands,
+      includeExtensionCommands: false
+    })
+    return mergeCommands(commands, builtinAvailableCommands())
+  } catch {
+    return mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+  }
 }
 import { fileURLToPath } from 'node:url'
 
@@ -392,38 +408,20 @@ export class PiAcpAgent implements ACPAgent {
     // it will still be emitted as the first chunk of the first prompt.
     if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
-    // Advertise slash commands (ACP: available_commands_update)
-    // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
-    // So we must send this *after* the session/new response has been delivered.
+    // Finish the pi command probe before exposing the session so it cannot race the first prompt.
+    const availableCommands = await loadAvailableCommands(session.proc, fileCommands, enableSkillCommands)
+
+    // Important: some clients ignore notifications for an unknown sessionId, so publish after returning.
     setTimeout(() => {
-      void (async () => {
-        try {
-          const pi = (await session.proc.getCommands()) as any
-          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
-            enableSkillCommands,
-            includeExtensionCommands: false
-          })
-
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'available_commands_update',
-              availableCommands: mergeCommands(commands, builtinAvailableCommands())
-            }
-          })
-          return
-        } catch {
-          // Fall back to file-based prompt templates (legacy behavior).
-        }
-
-        await this.conn.sessionUpdate({
+      void this.conn
+        .sessionUpdate({
           sessionId: session.sessionId,
           update: {
             sessionUpdate: 'available_commands_update',
-            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+            availableCommands
           }
         })
-      })()
+        .catch(() => {})
     }, 0)
 
     return response
@@ -882,14 +880,12 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const result = await session.prompt(message, images)
-
-    // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
-    // unless we know this was a cancellation.
-    const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
-
-    return { stopReason }
+    try {
+      return { stopReason: await session.prompt(message, images) }
+    } catch (error) {
+      this.sessions.close(session.sessionId)
+      throw error
+    }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -1061,6 +1057,7 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const { configOptions, models, modes } = await getSessionConfiguration(proc)
+    const availableCommands = await loadAvailableCommands(proc, fileCommands, enableSkillCommands)
 
     const response = {
       configOptions,
@@ -1075,34 +1072,15 @@ export class PiAcpAgent implements ACPAgent {
 
     // Advertise slash commands after the response so the client knows the session exists.
     setTimeout(() => {
-      void (async () => {
-        try {
-          const pi = (await proc.getCommands()) as any
-          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
-            enableSkillCommands,
-            includeExtensionCommands: false
-          })
-
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'available_commands_update',
-              availableCommands: mergeCommands(commands, builtinAvailableCommands())
-            }
-          })
-          return
-        } catch {
-          // fall back
-        }
-
-        await this.conn.sessionUpdate({
+      void this.conn
+        .sessionUpdate({
           sessionId: session.sessionId,
           update: {
             sessionUpdate: 'available_commands_update',
-            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+            availableCommands
           }
         })
-      })()
+        .catch(() => {})
     }, 0)
 
     return response
