@@ -284,6 +284,12 @@ export class PiAcpSession {
   // completes only when `agent_settled` is emitted.
   private inAgentLoop = false
 
+  // Last provider error seen on an assistant `message_end` in the current turn.
+  // Transient errors are deliberately NOT surfaced when they occur (auto-retry may
+  // recover, and retry status text omits raw errors on purpose); this is flushed to
+  // the client only at terminal points: retry exhaustion or `agent_settled`.
+  private lastAssistantError: string | null = null
+
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -474,6 +480,7 @@ export class PiAcpSession {
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
+    this.lastAssistantError = null
 
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
 
@@ -489,9 +496,17 @@ export class PiAcpSession {
     this.proc.prompt(t.message, t.images).catch(err => {
       // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
+      // Non-auth rejections must reach the client as text: without this, a failed
+      // prompt surfaces as a contentless `end_turn` and the thread looks dead (#98).
+      const authErr = maybeAuthRequiredError(err)
+      if (!authErr && !this.cancelRequested) {
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Prompt failed: ${errorText(err)}` } satisfies ContentBlock
+        })
+      }
       void this.flushEmits().finally(() => {
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
         if (authErr) {
           this.pendingTurn?.reject(authErr)
         } else {
@@ -607,6 +622,20 @@ export class PiAcpSession {
         }
 
         // Ignore other delta/event types for now.
+        break
+      }
+
+      case 'message_end': {
+        const message = (ev as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message
+        if (message?.role === 'assistant') {
+          // Remember the error, replacing any earlier one; a later successful
+          // assistant message (e.g. after auto-retry) clears it so nothing is
+          // reported for a run that recovered.
+          this.lastAssistantError =
+            message.stopReason === 'error' && typeof message.errorMessage === 'string' && message.errorMessage
+              ? message.errorMessage
+              : null
+        }
         break
       }
 
@@ -789,10 +818,27 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_end': {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Retry finished, resuming.' } satisfies ContentBlock
-        })
+        // pi emits `success: false` with a `finalError` when the retry budget is
+        // exhausted; claiming "resuming" there is wrong and hides the only diagnostic.
+        const success = (ev as { success?: boolean }).success !== false
+        if (success) {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Retry finished, resuming.' } satisfies ContentBlock
+          })
+        } else {
+          const attempt = Number((ev as { attempt?: unknown }).attempt)
+          const finalError = (ev as { finalError?: unknown }).finalError
+          const detail =
+            typeof finalError === 'string' && finalError ? finalError : (this.lastAssistantError ?? 'unknown error')
+          const attempts = Number.isFinite(attempt) ? ` after ${attempt} attempts` : ''
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Retry failed${attempts}: ${detail}` } satisfies ContentBlock
+          })
+          // Reported here; don't repeat it at `agent_settled`.
+          this.lastAssistantError = null
+        }
         break
       }
 
@@ -837,6 +883,16 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
+        // A turn that settled with its final assistant message in error state produced
+        // no visible output; surface the provider error so the thread isn't silently
+        // dead (#92). Retry-exhaustion errors were already reported at `auto_retry_end`.
+        if (this.lastAssistantError && !this.cancelRequested) {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Provider error: ${this.lastAssistantError}` } satisfies ContentBlock
+          })
+          this.lastAssistantError = null
+        }
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void this.flushEmits().finally(() => {
@@ -1002,6 +1058,11 @@ function optionIndex(optionId: string): number | null {
 
   const index = Number(rawIndex)
   return Number.isSafeInteger(index) && index >= 0 && String(index) === rawIndex ? index : null
+}
+
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return String(err)
 }
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {

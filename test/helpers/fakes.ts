@@ -29,6 +29,8 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  // When set, the next prompt() call rejects with this error (then resets).
+  nextPromptError: Error | null = null
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -43,6 +45,11 @@ export class FakePiRpcProcess {
 
   async prompt(message: string, attachments: unknown[] = []): Promise<void> {
     this.prompts.push({ message, attachments })
+    if (this.nextPromptError) {
+      const err = this.nextPromptError
+      this.nextPromptError = null
+      throw err
+    }
   }
 
   async abort(): Promise<void> {
