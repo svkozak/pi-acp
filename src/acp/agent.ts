@@ -50,6 +50,7 @@ import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSy
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { normalizeAdditionalDirectories } from './workspace-roots.js'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 type AdvertisedModel = {
@@ -180,7 +181,7 @@ export class PiAcpAgent implements ACPAgent {
 
   private async restoreSession(
     sessionId: string,
-    opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers'] }
+    opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers']; additionalDirectories?: string[] }
   ): Promise<PiAcpSession> {
     const existing = this.sessions.maybeGet(sessionId)
     if (existing) return existing
@@ -201,7 +202,8 @@ export class PiAcpAgent implements ACPAgent {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          additionalDirectories: opts?.additionalDirectories
         })
       } catch (e: any) {
         if (e?.name === 'PiRpcSpawnError') {
@@ -216,7 +218,8 @@ export class PiAcpAgent implements ACPAgent {
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
         proc,
-        fileCommands
+        fileCommands,
+        additionalDirectories: opts?.additionalDirectories
       })
 
       this.lastSessionCwd = cwd
@@ -263,7 +266,8 @@ export class PiAcpAgent implements ACPAgent {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
           list: {},
-          delete: {}
+          delete: {},
+          additionalDirectories: {}
         }
       }
     }
@@ -273,6 +277,8 @@ export class PiAcpAgent implements ACPAgent {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
+
+    const additionalDirectories = normalizeAdditionalDirectories(params.additionalDirectories, params.cwd)
 
     this.lastSessionCwd = params.cwd
 
@@ -285,7 +291,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      additionalDirectories
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.
@@ -363,7 +370,8 @@ export class PiAcpAgent implements ACPAgent {
       : buildStartupInfo({
           cwd: params.cwd,
           fileCommands,
-          updateNotice
+          updateNotice,
+          additionalDirectories
         })
 
     if (preludeText)
@@ -945,9 +953,11 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
+    const additionalDirectories = normalizeAdditionalDirectories(params.additionalDirectories, params.cwd)
     const session = await this.restoreSession(params.sessionId, {
       cwd: params.cwd,
-      mcpServers: params.mcpServers
+      mcpServers: params.mcpServers,
+      additionalDirectories
     })
     const proc = session.proc
     const fileCommands = loadSlashCommands(params.cwd)
@@ -1489,6 +1499,7 @@ function buildStartupInfo(opts: {
   cwd: string
   fileCommands: ReturnType<typeof loadSlashCommands>
   updateNotice: string | null
+  additionalDirectories?: string[]
 }): string {
   void opts.fileCommands
 
@@ -1524,6 +1535,9 @@ function buildStartupInfo(opts: {
   const contextPath = join(opts.cwd, 'AGENTS.md')
   if (existsSync(contextPath)) contextItems.push(contextPath)
   addSection('Context', contextItems)
+
+  // Additional workspace roots (ACP additionalDirectories)
+  addSection('Additional workspace roots', opts.additionalDirectories ?? [])
 
   // Skills
   const skillsItems: string[] = []
