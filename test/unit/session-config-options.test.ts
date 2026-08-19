@@ -146,6 +146,98 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
   ])
 })
 
+test('PiAcpAgent: setSessionConfigOption resolves model ids whose provider or id contains a slash', async () => {
+  const conn = new FakeAgentSideConnection()
+  // A provider id named after a base URL, and a model id carrying its org
+  // prefix: both halves of "provider/model" contain slashes of their own.
+  const models = [
+    { provider: 'http://localhost:8000', id: 'qwen3-27b', name: 'Qwen3 27B' },
+    { provider: 'lmstudio', id: 'google/gemma-3-12b', name: 'Gemma 3 12B' }
+  ]
+  const state = {
+    thinkingLevel: 'medium',
+    model: { provider: 'http://localhost:8000', id: 'qwen3-27b' }
+  }
+  const setModelCalls: Array<{ provider: string; modelId: string }> = []
+
+  const session = {
+    sessionId: 's1',
+    cwd: process.cwd(),
+    proc: {
+      async getAvailableModels() {
+        return { models }
+      },
+      async getState() {
+        return state
+      },
+      async setModel(provider: string, modelId: string) {
+        setModelCalls.push({ provider, modelId })
+        state.model = { provider, id: modelId }
+      }
+    }
+  }
+
+  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
+  ;(agent as any).sessions = new FakeSessions(session) as any
+
+  // Exactly the values newSession advertised for these models.
+  for (const model of models) {
+    await agent.setSessionConfigOption({
+      sessionId: 's1',
+      configId: 'model',
+      value: `${model.provider}/${model.id}`
+    } as any)
+  }
+
+  assert.deepEqual(setModelCalls, [
+    { provider: 'http://localhost:8000', modelId: 'qwen3-27b' },
+    { provider: 'lmstudio', modelId: 'google/gemma-3-12b' }
+  ])
+})
+
+test('PiAcpAgent: setSessionConfigOption accepts a bare model id and rejects an unknown one', async () => {
+  const conn = new FakeAgentSideConnection()
+  const state = {
+    thinkingLevel: 'medium',
+    model: { provider: 'test', id: 'alpha' }
+  }
+  const setModelCalls: Array<{ provider: string; modelId: string }> = []
+
+  const session = {
+    sessionId: 's1',
+    cwd: process.cwd(),
+    proc: {
+      async getAvailableModels() {
+        return {
+          models: [
+            { provider: 'test', id: 'alpha', name: 'Alpha' },
+            { provider: 'test', id: 'beta', name: 'Beta' }
+          ]
+        }
+      },
+      async getState() {
+        return state
+      },
+      async setModel(provider: string, modelId: string) {
+        setModelCalls.push({ provider, modelId })
+        state.model = { provider, id: modelId }
+      }
+    }
+  }
+
+  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
+  ;(agent as any).sessions = new FakeSessions(session) as any
+
+  await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'beta' } as any)
+  assert.deepEqual(setModelCalls, [{ provider: 'test', modelId: 'beta' }])
+
+  await assert.rejects(
+    () => agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'gamma' } as any),
+    /invalid params/i
+  )
+  assert.equal(setModelCalls.length, 1)
+})
+
 test('PiAcpAgent: setSessionConfigOption maps thought level changes to pi and emits sync updates', async () => {
   const conn = new FakeAgentSideConnection()
   const state = {
