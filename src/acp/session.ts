@@ -27,6 +27,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { contextTokens, contextWindowFor } from './translate/usage.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -296,6 +297,11 @@ export class PiAcpSession {
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
 
+  // A model's context window, keyed `provider/id`. pi states it in the model
+  // list rather than on the message that spends the tokens, so it is looked up
+  // on first use and kept for the rest of the session.
+  private contextWindows = new Map<string, number | null>()
+
   constructor(opts: {
     sessionId: string
     cwd: string
@@ -463,6 +469,40 @@ export class PiAcpSession {
     })
   }
 
+  /**
+   * Resolve a model's context window, caching the answer — including a null
+   * one, so a model that never reports a window costs a single lookup rather
+   * than one per message.
+   */
+  private async contextWindow(provider: string, id: string): Promise<number | null> {
+    const key = `${provider}/${id}`
+    const cached = this.contextWindows.get(key)
+    if (cached !== undefined) return cached
+
+    let size: number | null = null
+    try {
+      size = contextWindowFor(await this.proc.getAvailableModels(), provider, id)
+    } catch {
+      // A model list we can't read just means no usage reporting for this model.
+    }
+
+    this.contextWindows.set(key, size)
+    return size
+  }
+
+  private emitUsage(message: unknown): void {
+    const m = message as any
+    const used = contextTokens(m?.usage)
+    const provider = String(m?.provider ?? '')
+    const model = String(m?.model ?? '')
+    if (used === null || !provider || !model) return
+
+    void this.contextWindow(provider, model).then(size => {
+      if (size === null) return
+      this.emit({ sessionUpdate: 'usage_update', used, size })
+    })
+  }
+
   private cleanupToolCall(toolCallId: string): void {
     this.currentToolCalls.delete(toolCallId)
     this.fileSnapshots.delete(toolCallId)
@@ -603,6 +643,15 @@ export class PiAcpSession {
             }
           }
 
+          break
+        }
+
+        // `done` carries the final assistant message, the one place pi states
+        // both the tokens spent and the model they were spent on. `error`
+        // carries a message too, but pi treats aborted and errored usage as
+        // invalid, so it is deliberately left unreported.
+        if (ame?.type === 'done') {
+          this.emitUsage(ame.message)
           break
         }
 
