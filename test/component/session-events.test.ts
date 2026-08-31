@@ -146,6 +146,91 @@ test('PiAcpSession: emits tool locations from pi path args', async () => {
   assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: `${process.cwd()}/src/acp/session.ts` }])
 })
 
+test('PiAcpSession: completes extension commands that do not start an agent run', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.commands = { commands: [{ name: 'wt', source: 'extension' }] }
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const reason = await session.prompt('/wt create feature-name')
+
+  assert.equal(reason, 'end_turn')
+  assert.deepEqual(proc.prompts, [{ message: '/wt create feature-name', attachments: [] }])
+  await new Promise(r => setTimeout(r, 0))
+  assert.deepEqual(conn.updates.at(-1)?.update, {
+    sessionUpdate: 'session_info_update',
+    _meta: { piAcp: { queueDepth: 0, running: false } }
+  })
+})
+
+test('PiAcpSession: waits for agent settlement when an extension command starts a run', async () => {
+  class AgentStartingProcess extends FakePiRpcProcess {
+    override async prompt(message: string, attachments: unknown[] = []): Promise<void> {
+      this.prompts.push({ message, attachments })
+      this.emit({ type: 'agent_start' })
+    }
+  }
+
+  const conn = new FakeAgentSideConnection()
+  const proc = new AgentStartingProcess()
+  proc.commands = { commands: [{ name: 'handoff', source: 'extension' }] }
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+  let completed = false
+  const result = session.prompt('/handoff').then(reason => {
+    completed = true
+    return reason
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(completed, false)
+
+  proc.emit({ type: 'agent_end' })
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(completed, false)
+
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await result, 'end_turn')
+})
+
+test('PiAcpSession: does not complete non-extension slash prompts from the RPC acknowledgement', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.commands = { commands: [{ name: 'review', source: 'prompt' }] }
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+  let completed = false
+  const result = session.prompt('/review').then(reason => {
+    completed = true
+    return reason
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(completed, false)
+
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await result, 'end_turn')
+})
+
 test('PiAcpSession: handles extension select via ACP permission request', async () => {
   const conn = new FakeAgentSideConnection()
   conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'choice-1' } }
