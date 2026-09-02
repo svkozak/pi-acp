@@ -121,7 +121,8 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
         setModelCalls.push({ provider, modelId })
         state.model = { provider, id: modelId }
       }
-    }
+    },
+    async sendUsageUpdate() {}
   }
 
   const agent = new PiAcpAgent(asAgentConn(conn), {} as any)

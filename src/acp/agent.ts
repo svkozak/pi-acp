@@ -401,7 +401,7 @@ export class PiAcpAgent implements ACPAgent {
           const pi = (await session.proc.getCommands()) as any
           const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
-            includeExtensionCommands: false
+            includeExtensionCommands: true
           })
 
           await this.conn.sessionUpdate({
@@ -471,6 +471,7 @@ export class PiAcpAgent implements ACPAgent {
             content: { type: 'text', text }
           }
         })
+        await session.sendUsageUpdate()
 
         return { stopReason: 'end_turn' }
       }
@@ -882,6 +883,32 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
+    // Extension commands are Pi command handlers, not model prompts. RPC resolves
+    // after the handler, including child agents and extension UI requests, finishes.
+    // They cannot use the normal agent_settled lifecycle because command-only handlers
+    // do not start a parent agent loop.
+    if (images.length === 0 && message.trimStart().startsWith('/')) {
+      const trimmed = message.trim()
+      const space = trimmed.indexOf(' ')
+      const commandName = space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)
+      try {
+        const piCommands = (await session.proc.getCommands()) as any
+        const raw = toAvailableCommandsFromPiGetCommands(piCommands, {
+          enableSkillCommands: true,
+          includeExtensionCommands: true
+        }).raw
+        const isExtensionCommand = raw.some(
+          command => command.source === 'extension' && command.name === commandName
+        )
+        if (isExtensionCommand) {
+          const result = await session.runExtensionCommand(message)
+          return { stopReason: result === 'cancelled' ? 'cancelled' : 'end_turn' }
+        }
+      } catch {
+        // Discovery is best-effort. Fall through for older Pi RPC implementations.
+      }
+    }
+
     const result = await session.prompt(message, images)
 
     // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
@@ -1073,14 +1100,15 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    // Advertise slash commands after the response so the client knows the session exists.
+    // Advertise session state after the response so the client knows the session exists.
     setTimeout(() => {
       void (async () => {
+        await session.sendUsageUpdate()
         try {
           const pi = (await proc.getCommands()) as any
           const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
-            includeExtensionCommands: false
+            includeExtensionCommands: true
           })
 
           await this.conn.sessionUpdate({
@@ -1138,6 +1166,7 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
     await setSessionModel(session.proc, params.modelId)
     await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    await session.sendUsageUpdate()
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1193,6 +1222,7 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    if (configId === MODEL_CONFIG_ID) await session.sendUsageUpdate()
     return { configOptions }
   }
 }

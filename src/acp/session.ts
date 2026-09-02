@@ -59,6 +59,78 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
 
+function compactFusionAgent(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object') return null
+  const source = value as Record<string, unknown>
+  return Object.fromEntries(
+    [
+      'role',
+      'model',
+      'slotId',
+      'slotName',
+      'color',
+      'primary',
+      'architect',
+      'thinking',
+      'status',
+      'ms',
+      'tokensIn',
+      'tokensOut',
+      'costUsd',
+      'toolCalls',
+      'error'
+    ]
+      .filter(key => key in source)
+      .map(key => [key, source[key]])
+  )
+}
+
+function compactFusionDetails(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object') return null
+  const source = value as Record<string, unknown>
+  const compact = Object.fromEntries(
+    [
+      'kind',
+      'command',
+      'title',
+      'ok',
+      'round',
+      'maxRounds',
+      'artifactsDir',
+      'totalMs',
+      'totalCostUsd',
+      'gateExitCode',
+      'error'
+    ]
+      .filter(key => key in source)
+      .map(key => [key, source[key]])
+  )
+  if (Array.isArray(source.models)) {
+    compact.models = source.models.filter(model => typeof model === 'string')
+  }
+  for (const key of ['roles', 'sources'] as const) {
+    if (Array.isArray(source[key])) {
+      compact[key] = source[key].map(compactFusionAgent).filter(item => item !== null)
+    }
+  }
+  // Preserve per-model provenance without repeating unbounded report bodies.
+  // The visible ACP content remains authoritative; these bounded answers let
+  // native clients restore the upstream panel/round structure.
+  if (Array.isArray(source.answers) && source.answers.length > 0) {
+    const perAnswer = Math.max(2_000, Math.min(60_000, Math.floor(240_000 / source.answers.length)))
+    compact.answers = source.answers.flatMap(value => {
+      const identity = compactFusionAgent(value)
+      if (!identity || !value || typeof value !== 'object') return []
+      const text = (value as Record<string, unknown>).text
+      if (typeof text !== 'string') return [{ ...identity, text: '' }]
+      return [{ ...identity, text: text.length <= perAnswer ? text : `${text.slice(0, perAnswer)}\n… [answer truncated in transport; complete report remains in run artifacts]` }]
+    })
+  }
+  const agent = compactFusionAgent(source.agent)
+  if (agent) compact.agent = agent
+  return compact
+}
+
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
 
@@ -295,6 +367,7 @@ export class PiAcpSession {
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
+  private lastUsage: { used: number; size: number } | null = null
 
   constructor(opts: {
     sessionId: string
@@ -372,6 +445,40 @@ export class PiAcpSession {
     return turnPromise
   }
 
+  /** Execute a Pi extension command through RPC without waiting for agent_settled.
+   * Extension handlers may run child agents and extension UI requests, but the parent
+   * Pi session does not start an agent loop for the command itself. The RPC response is
+   * therefore the authoritative completion boundary.
+   */
+  async runExtensionCommand(message: string): Promise<StopReason> {
+    if (this.pendingTurn) {
+      throw RequestError.invalidParams('Cannot start an extension command while an agent turn is running')
+    }
+
+    this.cancelRequested = false
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      _meta: { piAcp: { queueDepth: 0, running: true, extensionCommand: message.split(/\s+/, 1)[0] } }
+    })
+
+    try {
+      await this.proc.prompt(message, [])
+      await this.flushEmits()
+      await this.sendUsageUpdate()
+      return this.cancelRequested ? 'cancelled' : 'end_turn'
+    } catch (error) {
+      const authError = maybeAuthRequiredError(error)
+      if (authError) throw authError
+      return this.cancelRequested ? 'cancelled' : 'error'
+    } finally {
+      this.emit({
+        sessionUpdate: 'session_info_update',
+        _meta: { piAcp: { queueDepth: 0, running: false } }
+      })
+      await this.flushEmits()
+    }
+  }
+
   async cancel(): Promise<void> {
     // Cancel current and clear any queued prompts.
     this.cancelRequested = true
@@ -415,6 +522,27 @@ export class PiAcpSession {
 
   private async flushEmits(): Promise<void> {
     await this.lastEmit
+  }
+
+  /** Publish pi's current context-window reading when one is available. */
+  async sendUsageUpdate(): Promise<void> {
+    try {
+      const stats = (await this.proc.getSessionStats()) as any
+      const contextUsage = stats?.contextUsage
+      const used = contextUsage?.tokens
+      const size = contextUsage?.contextWindow
+
+      if (Number.isSafeInteger(used) && used >= 0 && Number.isSafeInteger(size) && size > 0) {
+        if (!this.lastUsage || this.lastUsage.used !== used || this.lastUsage.size !== size) {
+          this.lastUsage = { used, size }
+          this.emit({ sessionUpdate: 'usage_update', used, size })
+        }
+      }
+    } catch {
+      // Older pi versions may not expose contextUsage. Usage is optional in ACP.
+    }
+
+    await this.flushEmits()
   }
 
   private emitBashToolCall(params: {
@@ -607,6 +735,28 @@ export class PiAcpSession {
         }
 
         // Ignore other delta/event types for now.
+        break
+      }
+
+      case 'message_end': {
+        const message = (ev as any).message
+        if (message?.role !== 'custom' || message?.display === false) break
+        const text = typeof message.content === 'string' ? message.content : ''
+        const customType = typeof message.customType === 'string' ? message.customType : null
+        const compactDetails = customType === 'fusion-harness' ? compactFusionDetails(message.details) : null
+        // Empty Fusion banners still carry the model roster and stage change.
+        // Other empty custom messages remain invisible.
+        if (!text && !compactDetails) break
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+          _meta: {
+            piAcp: {
+              customType,
+              details: compactDetails
+            }
+          }
+        } as SessionUpdate)
         break
       }
 
@@ -837,9 +987,9 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
-        // Ensure all updates derived from pi events are delivered before we resolve
-        // the ACP `session/prompt` request.
-        void this.flushEmits().finally(() => {
+        // Publish the final context reading and ensure all updates derived from pi
+        // events are delivered before we resolve the ACP `session/prompt` request.
+        void this.sendUsageUpdate().finally(() => {
           const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
           this.pendingTurn?.resolve(reason)
           this.pendingTurn = null
@@ -898,11 +1048,26 @@ export class PiAcpSession {
     }
 
     if (method === 'notify') {
+      const rawMessage = stringProp(ev, 'message') ?? 'Pi notification'
+      const isFusion = rawMessage.startsWith('fusion-harness:')
+      let message = rawMessage
+      if (isFusion && rawMessage.includes('session-only, YAML unchanged')) {
+        message = 'Model stack updated for this conversation.'
+      } else if (isFusion && rawMessage.includes('not available to clean-room Harness agents')) {
+        message = 'That model cannot run inside Harness. Choose another model.'
+      } else if (isFusion && rawMessage.includes('could not switch Main host model')) {
+        message = 'Main could not switch to that model. Choose another model.'
+      }
       this.emit({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock,
-        _meta: { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
-      })
+        content: { type: 'text', text: message } satisfies ContentBlock,
+        _meta: {
+          piAcp: {
+            notify: { level: stringProp(ev, 'notifyType') ?? 'info' },
+            ...(isFusion ? { customType: 'fusion-harness', details: { kind: 'notice', command: 'fh-model', ok: !rawMessage.includes('error') } } : {})
+          }
+        }
+      } as SessionUpdate)
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return
     }
