@@ -80,6 +80,10 @@ export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
+  // Events pi emits during startup (e.g. extension load / session_start, which
+  // run before our spawn handshake resolves and before any session attaches) are
+  // buffered and replayed to the first subscriber instead of being dropped.
+  private eventBacklog: PiRpcEvent[] = []
   private readonly preludeLines: string[] = []
 
   private constructor(child: ChildProcessWithoutNullStreams) {
@@ -109,6 +113,11 @@ export class PiRpcProcess {
             return
           }
         }
+      }
+
+      if (this.eventHandlers.length === 0) {
+        this.eventBacklog.push(msg as PiRpcEvent)
+        return
       }
 
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
@@ -207,6 +216,11 @@ export class PiRpcProcess {
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.eventHandlers.push(handler)
+    if (this.eventHandlers.length === 1 && this.eventBacklog.length > 0) {
+      const queued = this.eventBacklog
+      this.eventBacklog = []
+      for (const ev of queued) handler(ev)
+    }
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
     }
