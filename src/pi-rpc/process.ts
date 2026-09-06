@@ -1,5 +1,8 @@
+import type { McpServer } from '@agentclientprotocol/sdk'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
+import { getMcpBridgeExtensionPath } from '../mcp-bridge/extension-path.js'
+import { MCP_SERVERS_ENV } from '../mcp-bridge/servers.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
 export class PiRpcSpawnError extends Error {
@@ -74,6 +77,8 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** MCP servers from the ACP session request, wired into pi via the bundled bridge extension. */
+  mcpServers?: McpServer[]
 }
 
 export class PiRpcProcess {
@@ -144,12 +149,20 @@ export class PiRpcProcess {
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
     const args = ['--mode', 'rpc', '--no-themes']
+    // Hand the session's MCP servers to pi through the bundled bridge extension:
+    // pi loads it via `-e` and connects one MCP client per server from the env
+    // payload. One pi process per ACP session makes the env hand-off per-session.
+    let childEnv = process.env
+    if (params.mcpServers && params.mcpServers.length > 0) {
+      args.push('-e', getMcpBridgeExtensionPath())
+      childEnv = { ...process.env, [MCP_SERVERS_ENV]: JSON.stringify(params.mcpServers) }
+    }
     if (params.sessionPath) args.push('--session', params.sessionPath)
 
     const child = spawn(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env,
+      env: childEnv,
       shell: shouldUseShellForPiCommand(cmd)
     })
 

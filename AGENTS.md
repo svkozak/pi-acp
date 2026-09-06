@@ -25,7 +25,7 @@ Use `@agentclientprotocol/sdk`:
 ## Implementation constraints / decisions
 
 - Do **not** implement ACP client-side FS/terminal delegation in MVP. Pi already reads/writes and executes locally.
-- Ignore `mcpServers` for MVP (accept in params, store in session state).
+- Wire `mcpServers` into the spawned pi via the bundled bridge extension (`src/mcp-bridge/*`); see README § MCP servers.
 - Stream all pi assistant output as ACP `agent_message_chunk` initially.
 - Tool events: map pi tool execution events to ACP `tool_call` / `tool_call_update` (as text content).
 

@@ -26,6 +26,7 @@ Expect some minor breaking changes.
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
+- MCP servers from the ACP client (`session/new` / `session/load` `mcpServers`) are connected per session and their tools are exposed to pi (see [MCP servers](#mcp-servers))
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
@@ -165,6 +166,14 @@ Other built-in commands:
 
 **Note**: Slash commands provided by pi extensions are not currently supported.
 
+## MCP servers
+
+`mcpServers` sent by the ACP client on `session/new` (and `session/load`) are handed to the spawned pi process: the adapter passes each session's servers to pi through a bundled bridge extension (`-e` on the pi command line, servers carried in that session's process env — one pi process per session makes this per-session safe).
+
+The bridge opens one MCP client per server (`stdio` command servers, as well as `http` and `sse` URLs — the adapter advertises `mcpCapabilities: { http: true, sse: true }`) and registers every tool on pi as `<server>_<tool>`, so the model can call them like any other pi tool. A server that fails to connect reports itself in the transcript without affecting the others.
+
+The unstable ACP-channel transport (`type: "acp"`) is not supported. For pi-wide MCP servers configured outside ACP (e.g. via [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter)), pi loads them itself as usual; they are available in ACP sessions independently of this wiring.
+
 ## Authentication (ACP Registry support)
 
 This agent supports **Terminal Auth** for the [ACP Registry](https://agentclientprotocol.com/get-started/registry).
@@ -191,13 +200,14 @@ Project layout:
 
 - `src/acp/*` – ACP server + translation layer
 - `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol)
+- `src/mcp-bridge/*` – pi extension that connects a session's `mcpServers` and registers their tools with pi
 
 ## Limitations
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
-- MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
+- MCP servers that use the unstable ACP-channel transport (`type: "acp"`) are not connected.
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
 
 ## License

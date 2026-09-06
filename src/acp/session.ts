@@ -191,6 +191,7 @@ export class SessionManager {
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
+        mcpServers: params.mcpServers,
         piCommand: params.piCommand
       })
     } catch (e) {

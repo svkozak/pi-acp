@@ -200,6 +200,9 @@ export class PiAcpAgent implements ACPAgent {
       try {
         proc = await PiRpcProcess.spawn({
           cwd,
+          // Only hand servers through when the client sent some; a session
+          // without mcpServers spawns pi exactly as before.
+          ...(opts?.mcpServers?.length ? { mcpServers: opts.mcpServers } : {}),
           sessionPath: stored.sessionFile,
           piCommand: process.env.PI_ACP_PI_COMMAND
         })
@@ -253,7 +256,10 @@ export class PiAcpAgent implements ACPAgent {
       }),
       agentCapabilities: {
         loadSession: true,
-        mcpCapabilities: { http: false, sse: false },
+        // ACP `mcpServers` are wired into pi sessions via the bundled bridge
+        // extension, so both remote transports are supported. Stdio servers
+        // are always supported per the ACP spec.
+        mcpCapabilities: { http: true, sse: true },
         promptCapabilities: {
           image: true,
           audio: false,
@@ -279,7 +285,6 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
-    // Pi doesn't support mcpServers, but we accept and store.
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,
