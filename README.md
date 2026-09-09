@@ -130,6 +130,60 @@ You can add the environment variable in the Zed settings with:
   }
 ```
 
+### Client system prompts
+
+Clients can configure a session's system prompt through the ACP extension
+`session/new.params._meta.systemPrompt`. A nonempty string replaces Pi's base
+prompt; an object containing only `append` appends to it:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/new",
+  "params": {
+    "cwd": "/absolute/workspace",
+    "mcpServers": [],
+    "_meta": {
+      "systemPrompt": "You are an assistant working inside this application."
+    }
+  }
+}
+```
+
+To append instead, use:
+
+```json
+{ "systemPrompt": { "append": "Always explain changes concisely." } }
+```
+
+This second object is the `_meta` value. Other metadata can coexist with
+`systemPrompt`. Omitting it preserves the existing behavior. Null, blank
+replacement strings, and malformed objects return ACP `Invalid params` before
+starting Pi. An empty append string is allowed and follows Pi's explicit append
+behavior.
+
+Support is advertised in the `initialize` response at
+`agentCapabilities._meta.piAcp.systemPrompt`:
+
+```json
+{ "replace": true, "append": true, "persisted": true }
+```
+
+Prompt text is literal (never a client-supplied filename). The adapter supplies
+private files to Pi's `--system-prompt` / `--append-system-prompt` flags and stores
+the mode and original text in `~/.pi/pi-acp/session-map.json`. It reapplies them
+on `session/load`, automatic subprocess restoration, and adapter restart. Prompts
+are fixed for the session's lifetime; create a new session to change them.
+Deleting a session removes its saved prompt. Older sessions without a saved
+prompt keep their existing behavior. Opening the transcript directly in Pi does
+not apply this adapter-owned configuration.
+
+Pi still adds its normal project context, skills, and working directory, and
+extensions may modify the resulting prompt. Replacement overrides Pi's default
+base or discovered `SYSTEM.md`; explicit append follows Pi's CLI precedence and
+supersedes automatic `APPEND_SYSTEM.md` discovery. It does not replace the base.
+
 ### Slash commands
 
 `pi-acp` supports slash commands:

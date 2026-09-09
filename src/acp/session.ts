@@ -14,6 +14,7 @@ import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
+import type { SystemPrompt } from '../pi-rpc/system-prompt.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
@@ -34,6 +35,7 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
+  systemPrompt?: SystemPrompt
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -191,7 +193,8 @@ export class SessionManager {
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
-        piCommand: params.piCommand
+        piCommand: params.piCommand,
+        ...(params.systemPrompt ? { systemPrompt: params.systemPrompt } : {})
       })
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {
@@ -210,8 +213,16 @@ export class SessionManager {
     const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
     const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
 
-    if (sessionFile) {
-      this.store.upsert({ sessionId, cwd: params.cwd, sessionFile })
+    try {
+      if (params.systemPrompt && !sessionFile) {
+        throw new Error('Pi did not return a session file; cannot persist the system prompt')
+      }
+      if (sessionFile) {
+        this.store.upsert({ sessionId, cwd: params.cwd, sessionFile, systemPrompt: params.systemPrompt })
+      }
+    } catch (error) {
+      proc.dispose()
+      throw error
     }
 
     const session = new PiAcpSession({

@@ -25,7 +25,8 @@ import {
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
-import { SessionStore } from './session-store.js'
+import { SessionStore, type StoredSession } from './session-store.js'
+import { parseSystemPrompt } from './system-prompt.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
@@ -157,10 +158,10 @@ export class PiAcpAgent implements ACPAgent {
     this.store.delete(sessionId)
   }
 
-  private findStoredSession(sessionId: string): { cwd: string; sessionFile: string } | null {
+  private findStoredSession(sessionId: string): Pick<StoredSession, 'cwd' | 'sessionFile' | 'systemPrompt'> | null {
     const stored = this.store.get(sessionId)
     if (stored?.cwd && stored?.sessionFile) {
-      return { cwd: stored.cwd, sessionFile: stored.sessionFile }
+      return { cwd: stored.cwd, sessionFile: stored.sessionFile, systemPrompt: stored.systemPrompt }
     }
 
     const piSession = findPiSession(sessionId)
@@ -201,7 +202,8 @@ export class PiAcpAgent implements ACPAgent {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          ...(stored.systemPrompt ? { systemPrompt: stored.systemPrompt } : {})
         })
       } catch (e: any) {
         if (e?.name === 'PiRpcSpawnError') {
@@ -252,6 +254,7 @@ export class PiAcpAgent implements ACPAgent {
         supportsTerminalAuthMeta: (params as any)?.clientCapabilities?._meta?.['terminal-auth'] === true
       }),
       agentCapabilities: {
+        _meta: { piAcp: { systemPrompt: { replace: true, append: true, persisted: true } } },
         loadSession: true,
         mcpCapabilities: { http: false, sse: false },
         promptCapabilities: {
@@ -270,6 +273,7 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async newSession(params: NewSessionRequest) {
+    const systemPrompt = parseSystemPrompt(params._meta?.systemPrompt)
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
@@ -285,7 +289,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      ...(systemPrompt ? { systemPrompt } : {})
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.

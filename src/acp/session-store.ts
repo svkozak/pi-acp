@@ -1,12 +1,14 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { getPiAcpSessionMapPath } from './paths.js'
+import type { SystemPrompt } from '../pi-rpc/system-prompt.js'
 
 export type StoredSession = {
   sessionId: string
   cwd: string
   sessionFile: string
   updatedAt: string
+  systemPrompt?: SystemPrompt
 }
 
 type SessionMapFile = {
@@ -33,7 +35,8 @@ function loadFile(path: string): SessionMapFile {
 
 function saveFile(path: string, data: SessionMapFile): void {
   ensureParentDir(path)
-  writeFileSync(path, JSON.stringify(data, null, 2) + '\n', 'utf-8')
+  writeFileSync(path, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 })
+  chmodSync(path, 0o600)
 }
 
 export class SessionStore {
@@ -48,12 +51,14 @@ export class SessionStore {
     return db.sessions[sessionId] ?? null
   }
 
-  upsert(entry: { sessionId: string; cwd: string; sessionFile: string }): void {
+  upsert(entry: { sessionId: string; cwd: string; sessionFile: string; systemPrompt?: SystemPrompt }): void {
     const db = loadFile(this.path)
+    const systemPrompt = entry.systemPrompt ?? db.sessions[entry.sessionId]?.systemPrompt
     db.sessions[entry.sessionId] = {
       sessionId: entry.sessionId,
       cwd: entry.cwd,
       sessionFile: entry.sessionFile,
+      ...(systemPrompt ? { systemPrompt } : {}),
       updatedAt: new Date().toISOString()
     }
     saveFile(this.path, db)

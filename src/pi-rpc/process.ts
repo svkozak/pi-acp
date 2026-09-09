@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+import { prepareSystemPrompt, type SystemPrompt } from './system-prompt.js'
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -74,6 +75,7 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  systemPrompt?: SystemPrompt
 }
 
 export class PiRpcProcess {
@@ -136,17 +138,26 @@ export class PiRpcProcess {
     // (e.g. MCP extensions, prompt templates for workflows).
     const args = ['--mode', 'rpc', '--no-themes']
     if (params.sessionPath) args.push('--session', params.sessionPath)
-
-    const child = spawn(cmd, args, {
-      cwd: params.cwd,
-      stdio: 'pipe',
-      env: process.env,
-      shell: shouldUseShellForPiCommand(cmd)
-    })
+    const prompt = prepareSystemPrompt(params.systemPrompt)
+    args.push(...prompt.args)
+    let child: ChildProcessWithoutNullStreams
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
     // deterministic error instead of later EPIPE/internal-error noise.
     try {
+      child = spawn(cmd, args, {
+        cwd: params.cwd,
+        stdio: 'pipe',
+        env: process.env,
+        shell: shouldUseShellForPiCommand(cmd)
+      })
+      child.once('exit', () => {
+        try {
+          prompt.dispose()
+        } catch {
+          // The process has exited; cleanup must not crash the ACP server.
+        }
+      })
       await new Promise<void>((resolve, reject) => {
         const onSpawn = () => {
           cleanup()
@@ -165,6 +176,7 @@ export class PiRpcProcess {
         child.once('error', onError)
       })
     } catch (e: any) {
+      prompt.dispose()
       const code = typeof e?.code === 'string' ? e.code : undefined
       if (code === 'ENOENT') {
         throw new PiRpcSpawnError(
