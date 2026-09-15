@@ -183,7 +183,8 @@ export class PiAcpAgent implements ACPAgent {
     opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers'] }
   ): Promise<PiAcpSession> {
     const existing = this.sessions.maybeGet(sessionId)
-    if (existing) return existing
+    if (existing && !existing.isClosed) return existing
+    if (existing) this.sessions.close(sessionId)
 
     const inFlight = this.restoringSessions.get(sessionId)
     if (inFlight) return inFlight
@@ -366,15 +367,7 @@ export class PiAcpAgent implements ACPAgent {
           updateNotice
         })
 
-    if (preludeText)
-      session.setStartupInfo(preludeText)
-
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
+    if (preludeText) session.setStartupInfo(preludeText)
 
     const response = {
       sessionId: session.sessionId,
@@ -932,11 +925,6 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
 
-    // If the client is re-loading a session that is already active, tear down the existing
-    // pi subprocess so we can start fresh and re-advertise commands reliably.
-    // (Some clients may call session/load when restoring from history.)
-    this.sessions.close(params.sessionId)
-
     this.lastSessionCwd = params.cwd
 
     const stored = this.findStoredSession(params.sessionId)
@@ -951,10 +939,6 @@ export class PiAcpAgent implements ACPAgent {
     })
     const proc = session.proc
     const fileCommands = loadSlashCommands(params.cwd)
-
-    // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
-    // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
 
     // (Optional) ensure mapping stays fresh.
     this.store.upsert({
@@ -1109,6 +1093,7 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async deleteSession(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
+    this.sessions.close(params.sessionId)
     const stored = this.store.get(params.sessionId)
     const piSession = findPiSession(params.sessionId)
 

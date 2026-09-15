@@ -29,6 +29,12 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  disposeCount = 0
+
+  dispose(): void {
+    this.disposeCount++
+    this.emit({ type: 'process_exit', error: 'pi process exited (code=null, signal=SIGTERM)' })
+  }
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -63,6 +69,10 @@ export class FakePiRpcProcess {
 
   async getMessages(): Promise<any> {
     return { messages: [] }
+  }
+
+  async getCommands(): Promise<unknown> {
+    return { commands: [] }
   }
 }
 
