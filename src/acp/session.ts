@@ -14,6 +14,7 @@ import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
+import { titleFromContent } from './session-title.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
@@ -220,7 +221,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      title: typeof state?.sessionName === 'string' ? state.sessionName : null
     })
 
     this.sessions.set(sessionId, session)
@@ -237,7 +239,10 @@ export class SessionManager {
    * Used by session/load: create a session object bound to an existing sessionId/proc
    * if it isn't already registered.
    */
-  getOrCreate(sessionId: string, params: SessionCreateParams & { proc: PiRpcProcess }): PiAcpSession {
+  getOrCreate(
+    sessionId: string,
+    params: SessionCreateParams & { proc: PiRpcProcess; title?: string | null }
+  ): PiAcpSession {
     const existing = this.sessions.get(sessionId)
     if (existing) return existing
 
@@ -247,7 +252,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      title: params.title
     })
 
     this.sessions.set(sessionId, session)
@@ -262,6 +268,8 @@ export class PiAcpSession {
 
   private startupInfo: string | null = null
   private startupInfoSent = false
+  private title: string | null
+  private titlePublished = false
 
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
@@ -303,6 +311,7 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    title?: string | null
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -310,6 +319,7 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.title = opts.title || null
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -396,6 +406,14 @@ export class PiAcpSession {
 
   wasCancelRequested(): boolean {
     return this.cancelRequested
+  }
+
+  async publishTitle(title: string | null = this.title, updatedAt?: string): Promise<void> {
+    if (!title || (this.titlePublished && title === this.title)) return
+    this.title = title
+    this.titlePublished = true
+    this.emit({ sessionUpdate: 'session_info_update', title, ...(updatedAt ? { updatedAt } : {}) })
+    await this.flushEmits()
   }
 
   private emit(update: SessionUpdate): void {
@@ -517,6 +535,16 @@ export class PiAcpSession {
     const type = String((ev as any).type ?? '')
 
     switch (type) {
+      case 'message_start':
+      case 'message_end': {
+        const message = ev.message as { role?: unknown; content?: unknown } | null | undefined
+        if (message?.role === 'user') {
+          // Mirror Pi's first-message display fallback without assigning a session name.
+          void this.publishTitle(this.title ?? titleFromContent(message.content))
+        }
+        break
+      }
+
       case 'message_update': {
         const ame = (ev as any).assistantMessageEvent
 

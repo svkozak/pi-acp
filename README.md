@@ -21,6 +21,7 @@ Expect some minor breaking changes.
 - Session persistence
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
   - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
+  - Session titles are published when resuming and when Pi receives the first user message, even with the startup banner enabled. Unnamed sessions display a whitespace-normalized preview of the first text message (up to 80 Unicode code points), without an extra model call or writing a session name. `/name` and saved names take precedence.
 - Slash commands
   - Loads file-based slash commands compatible with pi’s conventions
   - Adds a small set of built-in commands for headless/editor usage
