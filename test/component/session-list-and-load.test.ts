@@ -104,6 +104,10 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
 
       assert.ok(texts.some(t => t.kind === 'user_message_chunk' && t.text === 'Hello'))
       assert.ok(texts.some(t => t.kind === 'agent_message_chunk' && t.text === 'Hi there!'))
+      const titleUpdate = conn.updates.find(
+        ({ update }) => update.sessionUpdate === 'session_info_update' && update.title === s?.title
+      )
+      assert.ok(titleUpdate, 'loadSession must publish the same title as listSessions')
     } finally {
       PiRpcProcess.spawn = originalSpawn
     }

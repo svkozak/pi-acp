@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync, openSync, readSync, closeSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, isAbsolute } from 'node:path'
+import { titleFromContent } from './session-title.js'
 
 export type PiSessionListItem = {
   sessionId: string
@@ -229,37 +230,37 @@ function pickUpdatedAtFromTail(tail: string): string | null {
 
 function pickFallbackTitleFromHead(path: string): string | null {
   // Fallback to first user message.
-  // NOTE: we keep this simple: read a small head chunk and parse line-by-line.
   try {
     const raw = readFileSync(path, { encoding: 'utf8' })
     const lines = raw.split(/\r?\n/)
-    for (const line0 of lines) {
+    for (const line0 of lines.slice(0, 2000)) {
       const line = line0.trim()
       if (!line) continue
       try {
         const obj = JSON.parse(line) as any
         if (obj?.type === 'message' && obj?.message?.role === 'user') {
-          const content = obj?.message?.content
-          if (typeof content === 'string') return content.slice(0, 80)
-          if (Array.isArray(content)) {
-            const t = content.find((c: any) => c?.type === 'text' && typeof c?.text === 'string')
-            if (t?.text) return String(t.text).slice(0, 80)
-          }
+          const title = titleFromContent(obj.message.content)
+          if (title) return title
         }
       } catch {
         // ignore
       }
-
-      // Avoid scanning extremely large files fully.
-      // If we didn't find a user message in the first ~2000 lines, give up.
-      // (Most sessions have it early.)
-      if (lines.length > 2000) break
     }
   } catch {
     // ignore
   }
 
   return null
+}
+
+export function readPiSessionTitle(path: string, tail?: string): string | null {
+  try {
+    return (
+      pickTitleFromTail(tail ?? readTail(path)) ?? scanSessionInfoNameFromFile(path) ?? pickFallbackTitleFromHead(path)
+    )
+  } catch {
+    return null
+  }
 }
 
 export function listPiSessions(): PiSessionListItem[] {
@@ -280,15 +281,10 @@ export function listPiSessions(): PiSessionListItem[] {
     let title: string | null = null
     try {
       const tail = readTail(file)
-      title = pickTitleFromTail(tail)
+      title = readPiSessionTitle(file, tail)
       updatedAt = pickUpdatedAtFromTail(tail)
     } catch {
       // ignore
-    }
-
-    // If the session was named early and grew large, it may fall outside of the tail window.
-    if (!title) {
-      title = scanSessionInfoNameFromFile(file)
     }
 
     // Fallback for updatedAt when we couldn't parse timestamps from tail.
@@ -298,10 +294,6 @@ export function listPiSessions(): PiSessionListItem[] {
       } catch {
         updatedAt = null
       }
-    }
-
-    if (!title) {
-      title = pickFallbackTitleFromHead(file)
     }
 
     items.push({

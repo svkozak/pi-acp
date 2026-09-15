@@ -27,7 +27,7 @@ import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
-import { listPiSessions, findPiSession } from './pi-sessions.js'
+import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import {
@@ -216,7 +216,8 @@ export class PiAcpAgent implements ACPAgent {
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
         proc,
-        fileCommands
+        fileCommands,
+        title: readPiSessionTitle(stored.sessionFile)
       })
 
       this.lastSessionCwd = cwd
@@ -541,14 +542,7 @@ export class PiAcpAgent implements ACPAgent {
           return { stopReason: 'end_turn' }
         }
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'session_info_update',
-            title: name,
-            updatedAt: new Date().toISOString()
-          }
-        })
+        await session.publishTitle(name, new Date().toISOString())
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -962,6 +956,8 @@ export class PiAcpAgent implements ACPAgent {
       cwd: params.cwd,
       sessionFile: stored.sessionFile
     })
+
+    await session.publishTitle()
 
     // Replay full conversation history.
     const data = (await proc.getMessages()) as any
