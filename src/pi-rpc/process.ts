@@ -14,6 +14,7 @@ export class PiRpcSpawnError extends Error {
   }
 }
 
+const EXIT_DRAIN_TIMEOUT_MS = 1000
 const ESC = String.fromCharCode(0x1b)
 const CSI = String.fromCharCode(0x9b)
 
@@ -81,6 +82,8 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private terminalError: Error | null = null
+  private exitDrainTimer: ReturnType<typeof setTimeout> | undefined
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
@@ -114,16 +117,29 @@ export class PiRpcProcess {
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
     })
 
+    // Drain final stdout events, but do not hang if a grandchild inherited a pipe.
     child.on('exit', (code, signal) => {
-      const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
+      if (this.terminalError) return
+      this.exitDrainTimer = setTimeout(() => {
+        this.handleTermination(new Error(`pi process exited (code=${code}, signal=${signal})`))
+      }, EXIT_DRAIN_TIMEOUT_MS)
     })
+    child.on('close', (code, signal) => {
+      this.handleTermination(new Error(`pi process exited (code=${code}, signal=${signal})`))
+    })
+    child.on('error', err => this.handleTermination(err))
+    child.stdin.on('error', err => this.handleTermination(err))
+  }
 
-    child.on('error', err => {
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
-    })
+  private handleTermination(error: Error): void {
+    if (this.terminalError) return
+    clearTimeout(this.exitDrainTimer)
+    this.terminalError = error
+    for (const [, p] of this.pending) p.reject(error)
+    this.pending.clear()
+    // A prompt may already be acknowledged, so rejecting RPC requests alone is insufficient.
+    for (const h of this.eventHandlers) h({ type: 'process_exit', error: error.message })
+    this.eventHandlers = []
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
@@ -206,6 +222,10 @@ export class PiRpcProcess {
   }
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
+    if (this.terminalError) {
+      handler({ type: 'process_exit', error: this.terminalError.message })
+      return () => {}
+    }
     this.eventHandlers.push(handler)
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
@@ -340,6 +360,7 @@ export class PiRpcProcess {
   }
 
   private writeLine(line: string): Promise<void> {
+    if (this.terminalError) return Promise.reject(this.terminalError)
     return new Promise<void>((resolve, reject) => {
       try {
         this.child.stdin.write(line, error => {
