@@ -36,7 +36,7 @@ type SessionCreateParams = {
   piCommand?: string
 }
 
-export type StopReason = 'end_turn' | 'cancelled' | 'error'
+export type StopReason = 'end_turn' | 'cancelled'
 
 type PendingTurn = {
   resolve: (reason: StopReason) => void
@@ -283,6 +283,7 @@ export class PiAcpSession {
   // when retry, compaction, or queued continuations run. The session-level prompt
   // completes only when `agent_settled` is emitted.
   private inAgentLoop = false
+  private terminalError: Error | null = null
 
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
@@ -474,6 +475,7 @@ export class PiAcpSession {
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
+    this.terminalError = null
 
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
 
@@ -492,15 +494,13 @@ export class PiAcpSession {
       void this.flushEmits().finally(() => {
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
         const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
-        }
+        if (authErr) this.pendingTurn?.reject(authErr)
+        else if (this.cancelRequested) this.pendingTurn?.resolve('cancelled')
+        else this.pendingTurn?.reject(RequestError.internalError({}, errorMessage(err)))
 
         this.pendingTurn = null
         this.inAgentLoop = false
+        this.terminalError = null
 
         // If the prompt failed, do not automatically proceed—pi may be unhealthy.
         // But we still clear the queueDepth metadata.
@@ -833,17 +833,24 @@ export class PiAcpSession {
         // One low-level run ended. Pi may still retry, compact, or process a queued
         // continuation, so keep the ACP turn open until `agent_settled`.
         this.inAgentLoop = false
+        if (ev.willRetry !== true) this.terminalError = readAgentEndError(ev)
         break
       }
 
       case 'agent_settled': {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
+        const terminalError = this.terminalError
         void this.flushEmits().finally(() => {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
+          if (this.cancelRequested) this.pendingTurn?.resolve('cancelled')
+          else if (terminalError) {
+            const authErr = maybeAuthRequiredError(terminalError)
+            this.pendingTurn?.reject(authErr ?? RequestError.internalError({}, terminalError.message))
+          } else this.pendingTurn?.resolve('end_turn')
+
           this.pendingTurn = null
           this.inAgentLoop = false
+          this.terminalError = null
 
           // Start next queued prompt, if any.
           const next = this.turnQueue.shift()
@@ -988,6 +995,32 @@ function extensionUiToolCall(id: string, ev: PiRpcEvent) {
 function stringProp(source: Record<string, unknown>, key: string): string | null {
   const value = source[key]
   return typeof value === 'string' ? value : null
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message
+  const message = String(error ?? '').trim()
+  return message || 'Pi agent failed.'
+}
+
+function readAgentEndError(ev: PiRpcEvent): Error | null {
+  const directStopReason = stringProp(ev, 'stopReason')
+  if (directStopReason === 'error') return new Error(errorMessage(stringProp(ev, 'errorMessage')))
+
+  const messages = Array.isArray(ev.messages) ? ev.messages : []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = recordValue(messages[index])
+    if (message && stringProp(message, 'stopReason') === 'error') {
+      return new Error(errorMessage(stringProp(message, 'errorMessage')))
+    }
+  }
+  return null
 }
 
 function optionIndex(optionId: string): number | null {
