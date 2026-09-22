@@ -96,7 +96,9 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
   assert.equal((conn.updates[0]!.update as any).toolCallId, 't1')
   assert.equal((conn.updates[0]!.update as any).title, 'ls')
   assert.equal((conn.updates[0]!.update as any).kind, 'execute')
-  assert.equal((conn.updates[0]!.update as any).status, 'in_progress')
+  // pi emits tool_execution_start before it runs the `tool_call` hook, so the call may still be
+  // blocked by an extension at this point: `pending`, not `in_progress`.
+  assert.equal((conn.updates[0]!.update as any).status, 'pending')
   assert.equal((conn.updates[0]!.update as any).locations, undefined)
   assert.deepEqual((conn.updates[0]!.update as any).content, [{ type: 'terminal', terminalId: 't1' }])
   assert.deepEqual((conn.updates[0]!.update as any)._meta, {
@@ -122,6 +124,103 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
     terminal_exit: { terminal_id: 't1', exit_code: 0, signal: null }
   })
   assert.equal((conn.updates[2]!.update as any).rawOutput, undefined)
+})
+
+test('PiAcpSession: tool_execution_start is pending, tool_execution_update is in_progress', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  // pi emits tool_execution_start before prepareToolCall, which is where an extension's blocking
+  // `tool_call` hook runs. A host must not be told the tool is running while it is still gated.
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'read', args: { path: 'a.txt' } })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
+  assert.equal((conn.updates[0]!.update as any).status, 'pending')
+
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 't1',
+    partialResult: { content: [{ type: 'text', text: 'reading' }] }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 2)
+  assert.equal(conn.updates[1]!.update.sessionUpdate, 'tool_call_update')
+  assert.equal((conn.updates[1]!.update as any).status, 'in_progress')
+})
+
+test('PiAcpSession: a blocked tool call never reports in_progress', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  // The shape a gate extension produces: start, then the hook blocks, so the call ends without
+  // ever executing. Nothing in between may claim the tool ran.
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'write', args: { path: 'a.txt' } })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    isError: true,
+    result: { content: [{ type: 'text', text: 'denied by host' }] }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const statuses = conn.updates.map(u => (u.update as any).status)
+  assert.deepEqual(statuses, ['pending', 'failed'])
+})
+
+test('PiAcpSession: a declining select option is typed reject_once', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'choice-1' } }
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui-1',
+    method: 'select',
+    title: 'Allow write?',
+    options: ['Allow once', 'Reject once']
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  // A host that routes on the ACP `kind` field must not read this rejection as an approval.
+  assert.deepEqual((conn.permissionRequests[0] as any).options, [
+    { optionId: 'choice-0', name: 'Allow once', kind: 'allow_once' },
+    { optionId: 'choice-1', name: 'Reject once', kind: 'reject_once' }
+  ])
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-1', value: 'Reject once' }])
 })
 
 test('PiAcpSession: emits tool locations from pi path args', async () => {
