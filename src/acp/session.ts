@@ -59,6 +59,20 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
 
+/**
+ * A select option whose name declines the action. ACP's PermissionOptionKind has no neutral
+ * value, so an arbitrary option has to be classified as allow or reject; stamping every one of
+ * them `allow_once` tells a host that a "No" is an approval. The confirm path already maps its
+ * own No to `reject_once` (CONFIRM_PERMISSION_OPTIONS) — this applies the same reading to the
+ * names an extension supplies.
+ */
+const REJECT_OPTION_NAME =
+  /^\s*(no\b|n\/a\b|never\b|not\b|none\b|cancel|abort|decline|deny|den(y|ied)|disallow|reject|refuse|skip|stop|don'?t\b|do not\b)/i
+
+function toPermissionOptionKind(name: string): PermissionOption['kind'] {
+  return REJECT_OPTION_NAME.test(name) ? 'reject_once' : 'allow_once'
+}
+
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
 
@@ -565,7 +579,7 @@ export class PiAcpSession {
 
             const locations = toToolCallLocations(rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
-            // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
+            // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_update).
             const status = existingStatus ?? 'pending'
 
             if (isBashTool(toolName)) {
@@ -610,6 +624,14 @@ export class PiAcpSession {
         break
       }
 
+      // pi emits `tool_execution_start` BEFORE it prepares the call: in pi-agent-core's
+      // agent-loop, executeToolCallsSequential/Parallel emit this event and only then await
+      // prepareToolCall, which is where `config.beforeToolCall` — every extension's blocking
+      // `tool_call` hook — runs and where a `block` short-circuits the call. So this event means
+      // "pi intends to run this", not "pi is running this", and a call that is still suspended at
+      // an extension's permission gate must not be reported to the host as `in_progress`.
+      // Execution start is signalled separately by `tool_execution_update`, and the call is
+      // settled by `tool_execution_end`.
       case 'tool_execution_start': {
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
@@ -619,13 +641,13 @@ export class PiAcpSession {
         if (isBashTool(toolName)) {
           const locations = toToolCallLocations(args, this.cwd)
           const existingStatus = this.currentToolCalls.get(toolCallId)
-          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.currentToolCalls.set(toolCallId, 'pending')
           this.emitBashToolCall({
             sessionUpdate: existingStatus ? 'tool_call_update' : 'tool_call',
             toolCallId,
             toolName,
             args,
-            status: 'in_progress',
+            status: 'pending',
             locations,
             includeTerminal: !existingStatus
           })
@@ -661,22 +683,22 @@ export class PiAcpSession {
 
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
-          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.currentToolCalls.set(toolCallId, 'pending')
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
             title: toolName,
             kind: toToolKind(toolName),
-            status: 'in_progress',
+            status: 'pending',
             locations,
             rawInput: args
           })
         } else {
-          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.currentToolCalls.set(toolCallId, 'pending')
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
-            status: 'in_progress',
+            status: 'pending',
             locations,
             rawInput: args
           })
@@ -685,9 +707,13 @@ export class PiAcpSession {
         break
       }
 
+      // Output from a running tool: the call is past every gate, so this is where `in_progress`
+      // becomes true (both branches below already emit it).
       case 'tool_execution_update': {
         const toolCallId = String((ev as any).toolCallId ?? '')
         if (!toolCallId) break
+
+        if (this.currentToolCalls.has(toolCallId)) this.currentToolCalls.set(toolCallId, 'in_progress')
 
         const partial = (ev as any).partialResult
         if (this.bashToolCallIds.has(toolCallId)) {
@@ -921,7 +947,7 @@ export class PiAcpSession {
     const permissionOptions: PermissionOption[] = options.map((name, index) => ({
       optionId: `${CHOICE_OPTION_PREFIX}${index}`,
       name,
-      kind: 'allow_once'
+      kind: toPermissionOptionKind(name)
     }))
 
     const selected = await this.requestExtensionPermission(id, ev, permissionOptions)
