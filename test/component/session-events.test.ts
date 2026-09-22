@@ -672,6 +672,36 @@ test('PiAcpSession: prompt stays open through retry runs until agent_settled', a
   assert.equal(reason, 'end_turn')
 })
 
+test('PiAcpSession: rejects a Pi auth error after agent_settled', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const prompt = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({
+    type: 'agent_end',
+    willRetry: false,
+    messages: [
+      {
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: '401 Your authentication token is invalid.'
+      }
+    ]
+  })
+  proc.emit({ type: 'agent_settled' })
+
+  await assert.rejects(prompt, /Configure an API key or log in with an OAuth provider/)
+})
+
 test('PiAcpSession: does not re-emit startup info on first prompt after it was already sent', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
