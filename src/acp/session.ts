@@ -561,6 +561,13 @@ export class PiAcpSession {
         if (authErr) {
           this.pendingTurn?.reject(authErr)
         } else {
+          // Surface error message to client before completing the turn.
+          const errorMessage = String((err as any)?.message ?? err ?? 'Unknown error')
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Error: ${errorMessage}` }
+          })
+
           const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
           this.pendingTurn?.resolve(reason)
         }
@@ -904,6 +911,16 @@ export class PiAcpSession {
 
       case 'agent_settled': {
         void this.settleTurn()
+        break
+      }
+
+      case 'agent_error':
+      case 'error': {
+        const message = String((ev as any).message ?? (ev as any).error ?? 'Unknown error')
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Error: ${message}` } satisfies ContentBlock
+        })
         break
       }
 
