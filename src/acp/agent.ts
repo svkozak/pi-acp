@@ -29,7 +29,7 @@ import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { toolResultTitle, toolResultToText } from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -1056,6 +1056,7 @@ export class PiAcpAgent implements ACPAgent {
           update: {
             sessionUpdate: 'tool_call_update',
             toolCallId,
+            title: toolResultTitle(toolName, m),
             status: isError ? 'failed' : 'completed',
             content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
             rawOutput: m

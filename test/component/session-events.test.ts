@@ -124,6 +124,46 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
   assert.equal((conn.updates[2]!.update as any).rawOutput, undefined)
 })
 
+test('PiAcpSession: adds a complete long generic tool result to the completed title', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'tool_execution_start',
+    toolCallId: 't1',
+    toolName: 'send_message',
+    args: { recipient: 'reviewer' }
+  })
+  const receipt = '📨 Message sent to Add collapsed tool result summaries #127 (01a092c1-c274-7760-a17e-ad52c1bde03e).'
+  const result = { content: [{ type: 'text', text: receipt }] }
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    toolName: 'send_message',
+    isError: false,
+    result
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 2)
+  const update = conn.updates[1]!.update as any
+  assert.equal(update.sessionUpdate, 'tool_call_update')
+  assert.equal(update.title, `send_message: ${receipt}`)
+  assert.equal(update.status, 'completed')
+  assert.deepEqual(update.content, [{ type: 'content', content: { type: 'text', text: receipt } }])
+  assert.equal(update.rawOutput, result)
+})
+
 test('PiAcpSession: emits tool locations from pi path args', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
