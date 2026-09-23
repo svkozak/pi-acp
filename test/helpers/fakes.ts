@@ -6,11 +6,15 @@ type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 export class FakeAgentSideConnection {
   readonly updates: SessionUpdateMsg[] = []
   readonly permissionRequests: unknown[] = []
+  sessionUpdateDelayMs = 0
   nextPermissionResponse: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } = {
     outcome: { outcome: 'selected', optionId: 'allow' }
   }
 
   async sessionUpdate(msg: SessionUpdateMsg): Promise<void> {
+    if (this.sessionUpdateDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, this.sessionUpdateDelayMs))
+    }
     this.updates.push(msg)
   }
 
