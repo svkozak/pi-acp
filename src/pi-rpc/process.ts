@@ -30,6 +30,7 @@ function stripAnsi(s: string): string {
 
 type PiRpcCommand =
   | { type: 'prompt'; id?: string; message: string; images?: unknown[] }
+  | { type: 'steer'; id?: string; message: string; images?: unknown[] }
   | { type: 'abort'; id?: string }
   | { type: 'get_state'; id?: string }
   // Model
@@ -263,6 +264,16 @@ export class PiRpcProcess {
   async abort(): Promise<void> {
     const res = await this.request({ type: 'abort' })
     if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`)
+  }
+
+  /**
+   * Steer a running turn: deliver `message` (and optional `images`) to the
+   * agent mid-turn, before its next LLM call. No-op if no turn is running;
+   * callers decide idle semantics (see the `_session/steering` ext method).
+   */
+  async steer(message: string, images: unknown[] = []): Promise<void> {
+    const res = await this.request({ type: 'steer', message, images })
+    if (!res.success) throw new Error(`pi steer failed: ${res.error ?? JSON.stringify(res.data)}`)
   }
 
   async getState(): Promise<unknown> {

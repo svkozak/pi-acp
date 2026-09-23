@@ -21,7 +21,8 @@ import {
   type SetSessionModeResponse,
   type StopReason,
   type DeleteSessionRequest,
-  type DeleteSessionResponse
+  type DeleteSessionResponse,
+  type ContentBlock
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
@@ -234,6 +235,46 @@ export class PiAcpAgent implements ACPAgent {
     }
   }
 
+  // ACP extension method (SDK routes unknown `_session/*` requests here).
+  // Implements the `_session/steering` contract (same method name as
+  // @agentclientprotocol/claude-agent-acp): inject a message into the RUNNING
+  // turn via pi's native `steer` RPC (delivered before the next LLM call) and
+  // answer `injected`; when idle, either report `promptRequired` (client opted
+  // in via _meta and will redeliver the text as a trackable `session/prompt`)
+  // or start a new turn fire-and-forget. NOTE: unrelated to pi's `/steering`
+  // slash command (queue delivery mode).
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (method === '_session/steering') {
+      const sessionId = params.sessionId
+      if (typeof sessionId !== 'string' || !sessionId) {
+        throw RequestError.invalidParams('_session/steering requires a sessionId')
+      }
+
+      const session = await this.restoreSession(sessionId)
+      const prompt = (Array.isArray(params.prompt) ? params.prompt : []) as ContentBlock[]
+      const { message, images } = promptToPiMessage(prompt)
+
+      if (!session.hasPendingTurn) {
+        const meta = params._meta as { steering?: { idleBehavior?: string } } | undefined
+        if (meta?.steering?.idleBehavior === 'promptRequired') {
+          return { outcome: 'promptRequired', reason: 'noRunningTurn' }
+        }
+        // Fire-and-forget: the steering response must not block on a whole turn.
+        this.prompt({ sessionId, prompt }).catch(() => {})
+        return { outcome: 'startedNewTurn' }
+      }
+
+      try {
+        await session.proc.steer(message, images)
+      } catch (e) {
+        throw RequestError.internalError({}, String((e as Error)?.message ?? e))
+      }
+      return { outcome: 'injected' }
+    }
+
+    throw RequestError.methodNotFound(method)
+  }
+
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
@@ -241,6 +282,9 @@ export class PiAcpAgent implements ACPAgent {
 
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
+      // Advertise the `_session/steering` extension method (additive `_meta`:
+      // merge with any other `_meta` keys, never replace them).
+      _meta: { steering: { supported: true } },
       agentInfo: {
         name: pkg.name ?? 'pi-acp',
         title: 'pi ACP adapter',

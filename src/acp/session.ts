@@ -294,6 +294,12 @@ export class PiAcpSession {
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
+
+  /** Whether a turn is currently in progress (read by the `_session/steering` extension method). */
+  get hasPendingTurn(): boolean {
+    return this.pendingTurn !== null
+  }
+
   private readonly turnQueue: QueuedTurn[] = []
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
