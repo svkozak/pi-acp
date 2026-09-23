@@ -10,16 +10,18 @@ class FakeSessions {
   }
 }
 
-test('PiAcpAgent: quietStartup=true disables startup info generation/emission', async () => {
+test('PiAcpAgent: quietStartup=true and update checks disabled suppress startup info', async () => {
   const prevAgentDir = process.env.PI_CODING_AGENT_DIR
+  const prevCheckForUpdates = process.env.PI_ACP_CHECK_FOR_UPDATES
 
-  // Force quietStartup in pi settings by pointing PI_CODING_AGENT_DIR at a temp dir.
+  // Force quietStartup and disable the update check in a temporary agent environment.
   const { mkdtempSync, writeFileSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
   const dir = mkdtempSync(join(tmpdir(), 'pi-acp-quietstartup-'))
   writeFileSync(join(dir, 'settings.json'), JSON.stringify({ quietStartup: true }, null, 2), 'utf-8')
   process.env.PI_CODING_AGENT_DIR = dir
+  process.env.PI_ACP_CHECK_FOR_UPDATES = 'false'
 
   // Spy on setTimeout calls (agent schedules startup info + available commands)
   const realSetTimeout = globalThis.setTimeout
@@ -62,20 +64,14 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
 
     const startupInfo = res?._meta?.piAcp?.startupInfo ?? null
 
-    // When quietStartup=true the full prelude is suppressed. However, an update notice
-    // (if one exists) is still surfaced because it's high-signal and actionable.
-    // The test must tolerate both cases since the live npm check may or may not find an update.
-    if (startupInfo) {
-      assert.match(startupInfo, /New version available/)
-      assert.equal(setStartupInfoCalled, true)
-      assert.equal(timeouts.length, 2)
-    } else {
-      assert.equal(setStartupInfoCalled, false)
-      assert.equal(timeouts.length, 1)
-    }
+    assert.equal(startupInfo, null)
+    assert.equal(setStartupInfoCalled, false)
+    assert.equal(timeouts.length, 1)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir
+    if (prevCheckForUpdates == null) delete process.env.PI_ACP_CHECK_FOR_UPDATES
+    else process.env.PI_ACP_CHECK_FOR_UPDATES = prevCheckForUpdates
   }
 })
