@@ -930,14 +930,7 @@ export class PiAcpSession {
     }
 
     if (method === 'input' || method === 'editor') {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: {
-          type: 'text',
-          text: `Pi ${method} UI request is not supported in ACP yet; cancelling it.`
-        } satisfies ContentBlock
-      })
-      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      await this.handleExtensionInput(ev, id)
       return
     }
 
@@ -952,6 +945,44 @@ export class PiAcpSession {
     }
 
     await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+  }
+
+  /**
+   * Pi `input`/`editor` UI requests carry freeform text (ask_user custom answers,
+   * comments, multi-select). ACP permission options cannot carry text, so surface
+   * them via the (UNSTABLE) `elicitation/create` form mechanism. Clients that do
+   * not support elicitation respond with an error, which we treat as a cancel
+   * (same behaviour as before this change).
+   */
+  private async handleExtensionInput(ev: PiRpcEvent, id: string): Promise<void> {
+    const title = stringProp(ev, 'title') ?? 'Pi input'
+    const placeholder = stringProp(ev, 'placeholder')
+    const prefill = stringProp(ev, 'prefill')
+    try {
+      const result = await this.conn.unstable_createElicitation({
+        sessionId: this.sessionId,
+        message: title,
+        mode: 'form',
+        requestedSchema: {
+          type: 'object',
+          title,
+          properties: {
+            value: {
+              type: 'string',
+              title: placeholder ?? 'Answer',
+              ...(prefill ? { default: prefill } : {})
+            }
+          },
+          required: ['value']
+        }
+      })
+      const value = result?.action === 'accept' ? result.content?.value : undefined
+      await this.proc.sendExtensionUiResponse(
+        typeof value === 'string' ? { id, value } : { id, cancelled: true }
+      )
+    } catch {
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+    }
   }
 
   private async handleExtensionSelect(ev: PiRpcEvent, id: string): Promise<void> {
