@@ -1416,32 +1416,29 @@ async function setSessionModel(proc: PiRpcProcess, requestedModelId: string): Pr
   // Accept either:
   //  - "provider/model" (preferred, matches how we advertise)
   //  - "model" (fallback, resolve via available models)
-  let provider: string | null = null
-  let modelId: string | null = null
+  //
+  // Either half may contain a slash — model ids like "google/gemma-3-12b" are
+  // common, and a provider id is whatever the extension registering it chose —
+  // so resolve against the catalog rather than guessing where the split falls.
+  const data = (await proc.getAvailableModels()) as any
+  const models: any[] = Array.isArray(data?.models) ? data.models : []
+  const found =
+    models.find(m => `${String(m?.provider ?? '')}/${String(m?.id ?? '')}` === requestedModelId) ??
+    models.find(m => String(m?.id ?? '') === requestedModelId)
 
-  if (requestedModelId.includes('/')) {
-    const [candidateProvider, ...rest] = requestedModelId.split('/')
-    provider = candidateProvider
-    modelId = rest.join('/')
-  } else {
-    modelId = requestedModelId
+  if (found) {
+    await proc.setModel(String(found.provider), String(found.id))
+    return
   }
 
-  if (!provider) {
-    const data = (await proc.getAvailableModels()) as any
-    const models: any[] = Array.isArray(data?.models) ? data.models : []
-    const found = models.find(m => String(m?.id) === modelId)
-    if (found) {
-      provider = String(found.provider)
-      modelId = String(found.id)
-    }
-  }
-
-  if (!provider || !modelId) {
+  // Not advertised by pi. Split at the first slash so the rejection still comes
+  // from pi rather than from a guess made here.
+  const separator = requestedModelId.indexOf('/')
+  if (separator < 1) {
     throw RequestError.invalidParams(`Unknown modelId: ${requestedModelId}`)
   }
 
-  await proc.setModel(provider, modelId)
+  await proc.setModel(requestedModelId.slice(0, separator), requestedModelId.slice(separator + 1))
 }
 
 function isSemver(v: string): boolean {
