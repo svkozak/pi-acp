@@ -268,6 +268,30 @@ test('PiAcpSession: cancels unsupported input and editor extension UI requests w
   assert.match((conn.updates[1]!.update as any).content.text, /editor UI request is not supported/)
 })
 
+test('PiAcpSession: bridges session_info_changed to session_info_update', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'session_info_changed', name: 'My Session' })
+  proc.emit({ type: 'session_info_changed' })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.deepEqual(conn.updates[0]!.update, {
+    sessionUpdate: 'session_info_update',
+    title: 'My Session'
+  })
+})
 test('PiAcpSession: emits agent_message_chunk for auto_retry_start with attempt/maxAttempts and rounded delay', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
