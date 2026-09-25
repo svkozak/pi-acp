@@ -47,6 +47,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.26.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "cross-spawn": "^7.0.6",
     "zod": "^3.25.0"
   },

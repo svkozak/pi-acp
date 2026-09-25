@@ -200,7 +200,8 @@ export class PiAcpAgent implements ACPAgent {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          ...(opts?.mcpServers?.length ? { mcpServers: opts.mcpServers } : {})
         })
       } catch (e: any) {
         if (e?.name === 'PiRpcSpawnError') {
@@ -252,7 +253,9 @@ export class PiAcpAgent implements ACPAgent {
       }),
       agentCapabilities: {
         loadSession: true,
-        mcpCapabilities: { http: false, sse: false },
+        // Session-scoped MCP servers are bridged into pi via a bundled extension
+        // that registers each MCP tool as a native pi tool (stdio + http + sse).
+        mcpCapabilities: { http: true, sse: true },
         promptCapabilities: {
           image: true,
           audio: false,
@@ -278,7 +281,7 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
-    // Pi doesn't support mcpServers, but we accept and store.
+    // mcpServers are bridged into pi via the bundled extension (see PiRpcProcess.spawn).
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,
