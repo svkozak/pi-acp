@@ -382,7 +382,7 @@ test('PiAcpSession: emits agent_message_chunk for auto_retry_end', async () => {
     fileCommands: []
   })
 
-  proc.emit({ type: 'auto_retry_end' } as any)
+  proc.emit({ type: 'auto_retry_end', success: true } as any)
 
   await new Promise(r => setTimeout(r, 0))
 
@@ -430,7 +430,7 @@ test('PiAcpSession: emits agent_message_chunk for auto_compaction_end', async ()
     fileCommands: []
   })
 
-  proc.emit({ type: 'auto_compaction_end' } as any)
+  proc.emit({ type: 'auto_compaction_end', result: {} } as any)
 
   await new Promise(r => setTimeout(r, 0))
 

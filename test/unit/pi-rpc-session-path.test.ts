@@ -14,10 +14,12 @@ function writeFakePi(root: string): string {
       "const readline = require('node:readline')",
       "const sessionPath = process.argv[process.argv.indexOf('--session') + 1]",
       "appendFileSync(sessionPath, 'started\\n')",
+      "const status = statusText => process.stdout.write(JSON.stringify({ type: 'extension_ui_request', method: 'setStatus', statusKey: 'pi-acp/background', statusText: JSON.stringify(statusText) }) + '\\n')",
+      "status({ version: 1, type: 'ready' })",
       "readline.createInterface({ input: process.stdin }).on('line', line => {",
       '  const command = JSON.parse(line)',
+      "  if (command.message === '/pi-acp-background cancel') status({ version: 1, type: 'cancelled' })",
       "  process.stdout.write(JSON.stringify({ type: 'response', id: command.id, command: command.type, success: true, data: { sessionFile: sessionPath } }) + '\\n')",
-      '  setTimeout(() => process.exit(0), 20)',
       '})'
     ].join('\n')
   )
@@ -50,7 +52,7 @@ test('PiRpcProcess passes distinct session paths intact to the pi launcher', asy
 
       for (const sessionPath of [first, second]) {
         const proc = await PiRpcProcess.spawn({ cwd: root, piCommand: launcher, sessionPath })
-        proc.dispose()
+        await proc.dispose()
       }
 
       assert.equal(readFileSync(first, 'utf8'), 'started\n')
@@ -82,7 +84,7 @@ test(
     try {
       Object.defineProperty(process, 'platform', { value: 'win32' })
       const proc = await PiRpcProcess.spawn({ cwd: root, piCommand: launcher, sessionPath })
-      proc.dispose()
+      await proc.dispose()
       assert.equal(readFileSync(sessionPath, 'utf8'), 'started\n')
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform })

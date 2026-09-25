@@ -19,7 +19,6 @@ import {
   type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
-  type StopReason,
   type DeleteSessionRequest,
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
@@ -125,8 +124,8 @@ export class PiAcpAgent implements ACPAgent {
   private readonly store = new SessionStore()
   private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
 
-  dispose(): void {
-    this.sessions.disposeAll()
+  async dispose(): Promise<void> {
+    await this.sessions.disposeAll()
   }
 
   // Remember recent session cwd and use it as the default filter.
@@ -137,8 +136,8 @@ export class PiAcpAgent implements ACPAgent {
     void _config
   }
 
-  private cleanupFailedNewSession(sessionId: string, state?: any | null): void {
-    this.sessions.close(sessionId)
+  private async cleanupFailedNewSession(sessionId: string, state?: any | null): Promise<void> {
+    await this.sessions.close(sessionId)
 
     const sessionFile =
       typeof state?.sessionFile === 'string' && state.sessionFile.trim()
@@ -317,12 +316,12 @@ export class PiAcpAgent implements ACPAgent {
     const availableModelsAuthErr = maybeAuthRequiredError(availableModelsErr)
 
     if (availableModelsAuthErr) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw availableModelsAuthErr
     }
 
     if (availableModelsErr) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.internalError({}, String((availableModelsErr as Error)?.message ?? availableModelsErr))
     }
 
@@ -330,7 +329,7 @@ export class PiAcpAgent implements ACPAgent {
     const rawModelsCount = Array.isArray(availableModels?.models) ? availableModels.models.length : 0
 
     if (rawModelsCount === 0) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.authRequired(
         { authMethods: getAuthMethods() },
         'Configure an API key or log in with an OAuth provider.'
@@ -338,7 +337,7 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     if (stateErr && maybeAuthRequiredError(stateErr)) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.authRequired(
         { authMethods: getAuthMethods() },
         'Configure an API key or log in with an OAuth provider.'
@@ -350,7 +349,7 @@ export class PiAcpAgent implements ACPAgent {
       if (stateErr) throw stateErr
       configuration = await getSessionConfiguration(session.proc, { state, availableModels })
     } catch (err) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw maybeAuthRequiredError(err) ?? RequestError.internalError({}, String((err as Error)?.message ?? err))
     }
     const { configOptions, models, modes } = configuration
@@ -370,15 +369,7 @@ export class PiAcpAgent implements ACPAgent {
           updateNotice
         })
 
-    if (preludeText)
-      session.setStartupInfo(preludeText)
-
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
+    if (preludeText) session.setStartupInfo(preludeText)
 
     const response = {
       sessionId: session.sessionId,
@@ -431,7 +422,9 @@ export class PiAcpAgent implements ACPAgent {
             availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
           }
         })
-      })()
+      })().catch(() => {
+        // The client may disconnect before the deferred notification is delivered.
+      })
     }, 0)
 
     return response
@@ -892,12 +885,7 @@ export class PiAcpAgent implements ACPAgent {
 
     const result = await session.prompt(message, images)
 
-    // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
-    // unless we know this was a cancellation.
-    const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
-
-    return { stopReason }
+    return { stopReason: result }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -943,7 +931,7 @@ export class PiAcpAgent implements ACPAgent {
     // If the client is re-loading a session that is already active, tear down the existing
     // pi subprocess so we can start fresh and re-advertise commands reliably.
     // (Some clients may call session/load when restoring from history.)
-    this.sessions.close(params.sessionId)
+    await this.sessions.close(params.sessionId)
 
     this.lastSessionCwd = params.cwd
 
@@ -962,15 +950,11 @@ export class PiAcpAgent implements ACPAgent {
     try {
       configuration = await getSessionConfiguration(proc)
     } catch (err) {
-      this.sessions.close(session.sessionId)
+      await this.sessions.close(session.sessionId)
       throw err
     }
     const { configOptions, models, modes } = configuration
     const fileCommands = loadSlashCommands(params.cwd)
-
-    // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
-    // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
 
     // (Optional) ensure mapping stays fresh.
     this.store.upsert({
@@ -1118,7 +1102,9 @@ export class PiAcpAgent implements ACPAgent {
             availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
           }
         })
-      })()
+      })().catch(() => {
+        // The client may disconnect before the deferred notification is delivered.
+      })
     }, 0)
 
     return response

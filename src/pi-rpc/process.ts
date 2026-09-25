@@ -1,6 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import crossSpawn from 'cross-spawn'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import {
+  BACKGROUND_COMMAND,
+  BACKGROUND_STATUS_KEY,
+  parseBackgroundMessage,
+  type BackgroundMessage
+} from './background-protocol.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
 export class PiRpcSpawnError extends Error {
@@ -31,6 +39,7 @@ function stripAnsi(s: string): string {
 type PiRpcCommand =
   | { type: 'prompt'; id?: string; message: string; images?: unknown[] }
   | { type: 'abort'; id?: string }
+  | { type: 'clear_queue'; id?: string }
   | { type: 'get_state'; id?: string }
   // Model
   | { type: 'get_available_models'; id?: string }
@@ -106,52 +115,134 @@ type SpawnParams = {
 }
 
 export class PiRpcProcess {
-  private readonly child: ChildProcessWithoutNullStreams
+  private child!: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private exitHandlers: Array<(error: Error) => void> = []
+  private generation = 0
+  private bridgeReady = false
+  private backgroundSeen = false
+  private cancellationResult: Extract<BackgroundMessage, { type: 'cancelled' }> | undefined
+  private cancelling: Promise<void> | undefined
+  private needsRestart = false
+  private restarting: Promise<void> | undefined
+  private disposed = false
+  private terminalError: Error | undefined
+  private failureCleanup: Promise<void> | undefined
+  private lastSnapshot: BackgroundMessage | undefined
 
-  private constructor(child: ChildProcessWithoutNullStreams) {
+  private constructor(private readonly params: SpawnParams) {}
+
+  private emit(event: PiRpcEvent): void {
+    for (const handler of this.eventHandlers) handler(event)
+  }
+
+  private fail(error: Error): void {
+    if (this.terminalError || this.disposed) return
+    this.terminalError = error
+    for (const request of this.pending.values()) request.reject(error)
+    this.pending.clear()
+    const childAlive = this.child?.exitCode === null && this.child?.signalCode === null
+    if (!childAlive && this.backgroundSeen)
+      this.terminalError = new Error(
+        `${error.message}; detached background cleanup could not be verified after parent exit`
+      )
+    const cleanup = this.cancelling ?? (childAlive && this.bridgeReady ? this.cancelBackground(false) : this.retire())
+    this.failureCleanup = cleanup
+      .catch(failure => {
+        this.terminalError = new Error(`${error.message}; background cleanup failed: ${String(failure)}`)
+      })
+      .then(() => {
+        const failure = this.terminalError ?? error
+        this.emit({ type: 'process_error', message: failure.message })
+        for (const handler of this.exitHandlers) handler(failure)
+        this.exitHandlers = []
+        this.eventHandlers = []
+      })
+  }
+
+  private bindChild(child: ChildProcessWithoutNullStreams): void {
     this.child = child
-
+    const generation = ++this.generation
     const rl = readline.createInterface({ input: child.stdout })
     rl.on('line', line => {
-      if (!line.trim()) return
-      let msg: any
+      if (generation !== this.generation || this.disposed || !line.trim()) return
+      let msg: PiRpcEvent
       try {
-        msg = JSON.parse(line)
+        const value: unknown = JSON.parse(line)
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return
+        msg = value as PiRpcEvent
       } catch {
-        // pi may emit a human-readable prelude on stdout before NDJSON starts.
-        // Capture it so the ACP adapter can surface it on session start.
-        const cleaned = stripAnsi(String(line)).trimEnd()
+        const cleaned = stripAnsi(line).trimEnd()
         if (cleaned) this.preludeLines.push(cleaned)
         return
       }
 
-      if (msg?.type === 'response') {
-        const id = typeof msg.id === 'string' ? msg.id : undefined
-        // `resolve` removes the pending entry. Responses for unknown or already timed-out
-        // ids are dropped: a response is never a pi event, so it must not be broadcast.
-        if (id !== undefined) this.pending.get(id)?.resolve(msg as PiRpcResponse)
+      if (msg.type === 'response') {
+        if (typeof msg.id === 'string') this.pending.get(msg.id)?.resolve(msg as PiRpcResponse)
         return
       }
-
-      for (const h of this.eventHandlers) h(msg as PiRpcEvent)
+      if (
+        msg.type === 'extension_ui_request' &&
+        msg.method === 'setStatus' &&
+        msg.statusKey === BACKGROUND_STATUS_KEY
+      ) {
+        try {
+          const message = parseBackgroundMessage(String(msg.statusText))
+          if (message.type === 'ready') this.bridgeReady = true
+          else if (message.type === 'cancelled') this.cancellationResult = message
+          else if (message.type === 'error') this.fail(new Error(message.message))
+          else if (message.type === 'snapshot') {
+            if (
+              this.lastSnapshot?.type === 'snapshot' &&
+              this.lastSnapshot.active.some(
+                job => !message.active.some(active => active.id === job.id) && message.finished?.id !== job.id
+              )
+            ) {
+              throw new Error('Background lifecycle ownership was lost before completion')
+            }
+            this.lastSnapshot = message
+            if (message.active.length) this.backgroundSeen = true
+            if (!this.terminalError) this.emit({ ...message, type: 'background_work' })
+          } else throw new Error('Unknown background bridge message')
+        } catch (error) {
+          this.fail(error instanceof Error ? error : new Error(String(error)))
+        }
+        return
+      }
+      if (!this.terminalError) this.emit(msg)
     })
-
     child.on('exit', (code, signal) => {
-      const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
+      rl.close()
+      if (generation === this.generation) this.fail(new Error(`pi process exited (code=${code}, signal=${signal})`))
     })
-
-    child.on('error', err => {
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
-    })
+    const onError = (error: Error) => {
+      if (generation === this.generation) this.fail(error)
+    }
+    child.on('error', onError)
+    child.stdin.on('error', onError)
+    child.stderr.on('data', () => {})
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
+    const proc = new PiRpcProcess({ ...params })
+    try {
+      await proc.start()
+      return proc
+    } catch (error) {
+      await proc.retire().catch(() => {})
+      throw error
+    }
+  }
+
+  private async start(): Promise<void> {
+    const params = this.params
+    this.needsRestart = false
+    this.bridgeReady = false
+    this.backgroundSeen = false
+    this.lastSnapshot = undefined
+    this.terminalError = undefined
     // On Windows, npm commonly creates pi.cmd / pi.bat launcher scripts.
     const cmd = getPiCommand(params.piCommand)
 
@@ -159,7 +250,11 @@ export class PiRpcProcess {
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
-    const args = ['--mode', 'rpc', '--no-themes']
+    const bundledExtension = new URL('./background-extension.js', import.meta.url)
+    const extension = existsSync(bundledExtension)
+      ? bundledExtension
+      : new URL('./background-extension.ts', import.meta.url)
+    const args = ['--mode', 'rpc', '--no-themes', '--extension', fileURLToPath(extension)]
     if (params.sessionPath) args.push('--session', params.sessionPath)
 
     // Windows cmd launchers need shell escaping; direct executables use native argv.
@@ -167,8 +262,10 @@ export class PiRpcProcess {
     const child = start(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env
+      env: { ...process.env, PI_ACP_BACKGROUND_BRIDGE: '1' }
     }) as ChildProcessWithoutNullStreams
+
+    this.bindChild(child)
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
     // deterministic error instead of later EPIPE/internal-error noise.
@@ -206,45 +303,91 @@ export class PiRpcProcess {
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
 
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
-    })
-
-    const proc = new PiRpcProcess(child)
-
-    // Best-effort handshake.
-    // Important: pi may emit a get_state response pointing at a sessionFile in a directory
-    // that is created lazily. Create the parent dir up-front to avoid later parse errors
-    // when we call commands like export_html.
-    try {
-      const state = (await proc.getState()) as any
-      const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
-      if (sessionFile) {
-        const { mkdirSync } = await import('node:fs')
-        const { dirname } = await import('node:path')
-        mkdirSync(dirname(sessionFile), { recursive: true })
-      }
-    } catch {
-      // ignore for now
+    const response = await this.request({ type: 'get_state' }, 30_000)
+    if (!response.success) throw new Error(response.error ?? 'pi startup state request failed')
+    const state = response.data as { sessionFile?: unknown }
+    if (!this.bridgeReady)
+      throw new Error('The pi background bridge did not initialize. Check pi extension loading errors.')
+    if (typeof state?.sessionFile === 'string') {
+      this.params.sessionPath = state.sessionFile
+      const { mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+      mkdirSync(dirname(state.sessionFile), { recursive: true })
     }
-
-    return proc
   }
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.eventHandlers.push(handler)
+    if (this.lastSnapshot) handler({ ...this.lastSnapshot, type: 'background_work' })
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
     }
   }
 
-  dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
-    if (this.child.killed) return
-    try {
-      this.child.kill(signal as any)
-    } catch {
-      // ignore
+  onExit(handler: (error: Error) => void): () => void {
+    this.exitHandlers.push(handler)
+    if (this.terminalError) {
+      void Promise.resolve(this.failureCleanup).then(() => {
+        if (this.exitHandlers.includes(handler)) {
+          this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
+          handler(this.terminalError!)
+        }
+      })
     }
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
+    }
+  }
+
+  get backgroundLifecycleEnabled(): boolean {
+    return this.bridgeReady
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return
+    try {
+      if (this.failureCleanup) await this.failureCleanup
+      else if (this.bridgeReady && !this.needsRestart) await this.abort()
+    } finally {
+      this.disposed = true
+      await this.retire()
+      this.exitHandlers = []
+      this.eventHandlers = []
+    }
+  }
+
+  private async retire(): Promise<void> {
+    const child = this.child
+    ++this.generation
+    for (const request of this.pending.values()) request.reject(new Error('pi process was retired'))
+    this.pending.clear()
+    if (!child || child.exitCode !== null || child.signalCode !== null) return
+    await new Promise<void>((resolve, reject) => {
+      let escalation: ReturnType<typeof setTimeout> | undefined
+      const timeout = setTimeout(() => {
+        try {
+          child.kill('SIGKILL')
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)))
+          return
+        }
+        escalation = setTimeout(() => finish(new Error('Timed out stopping the pi process')), 2_000)
+      }, 5_000)
+      const finish = (error?: Error) => {
+        clearTimeout(timeout)
+        clearTimeout(escalation)
+        child.off('exit', onExit)
+        if (error) reject(error)
+        else resolve()
+      }
+      const onExit = () => finish()
+      child.once('exit', onExit)
+      try {
+        child.kill('SIGTERM')
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
   }
 
   /**
@@ -257,13 +400,82 @@ export class PiRpcProcess {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<void> {
-    const res = await this.request({ type: 'prompt', message, images })
-    if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
+    await this.ensureRunning()
+    this.backgroundSeen = false
+    try {
+      const res = await this.request({ type: 'prompt', message, images })
+      if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
+    } catch (error) {
+      await this.failureCleanup
+      throw this.terminalError ?? error
+    }
   }
 
   async abort(): Promise<void> {
-    const res = await this.request({ type: 'abort' })
-    if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`)
+    if (this.cancelling) return this.cancelling
+    if (this.needsRestart) return
+    if (!this.bridgeReady) {
+      const res = await this.request({ type: 'abort' })
+      if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`)
+      return
+    }
+    this.cancelling = this.cancelBackground()
+    try {
+      await this.cancelling
+    } finally {
+      this.cancelling = undefined
+    }
+  }
+
+  private async cancelBackground(reportCancellation = true): Promise<void> {
+    this.cancellationResult = undefined
+    let error: Error | undefined
+    try {
+      const res = await this.request({ type: 'prompt', message: `/${BACKGROUND_COMMAND} cancel` }, 20_000, true)
+      if (!res.success) throw new Error(res.error ?? 'Background cancellation failed')
+      const cancellation = this.cancellationResult as Extract<BackgroundMessage, { type: 'cancelled' }> | undefined
+      if (!cancellation) throw new Error('Background cancellation was not acknowledged')
+      if (cancellation.error) throw new Error(cancellation.error)
+    } catch (failure) {
+      error = failure instanceof Error ? failure : new Error(String(failure))
+    }
+    try {
+      await this.retire()
+    } catch (failure) {
+      error ??= failure instanceof Error ? failure : new Error(String(failure))
+    }
+    this.needsRestart = !error && !this.terminalError && Boolean(this.params.sessionPath)
+    this.backgroundSeen = false
+    this.lastSnapshot = undefined
+    if (error) {
+      this.fail(error)
+      throw error
+    }
+    if (!reportCancellation || this.terminalError) return
+    if (!this.needsRestart) {
+      const failure = new Error('Cannot restore the pi session after cancellation: session path is missing')
+      this.fail(failure)
+      throw failure
+    }
+    this.emit({ type: 'background_cancelled' })
+  }
+
+  private async ensureRunning(): Promise<void> {
+    if (this.disposed) throw new Error('pi process is disposed')
+    if (this.terminalError) throw this.terminalError
+    if (this.restarting) return this.restarting
+    if (this.needsRestart) {
+      this.restarting = this.start()
+      try {
+        await this.restarting
+      } catch (error) {
+        await this.retire().catch(() => {})
+        this.fail(error instanceof Error ? error : new Error(String(error)))
+        throw error
+      } finally {
+        this.restarting = undefined
+      }
+    }
   }
 
   async getState(): Promise<unknown> {
@@ -327,7 +539,7 @@ export class PiRpcProcess {
   }
 
   async getSessionStats(timeoutMs?: number): Promise<PiSessionStats> {
-    const res = await this.request({ type: 'get_session_stats' }, { timeoutMs })
+    const res = await this.request({ type: 'get_session_stats' }, timeoutMs)
     if (!res.success) throw new Error(`pi get_session_stats failed: ${res.error ?? JSON.stringify(res.data)}`)
     return (res.data ?? {}) as PiSessionStats
   }
@@ -358,25 +570,28 @@ export class PiRpcProcess {
   async getCommands(): Promise<unknown> {
     const res = await this.request({ type: 'get_commands' })
     if (!res.success) throw new Error(`pi get_commands failed: ${res.error ?? JSON.stringify(res.data)}`)
-    return res.data
+    const data = res.data
+    if (data && typeof data === 'object' && 'commands' in data && Array.isArray(data.commands)) {
+      return { ...data, commands: data.commands.filter(command => command?.name !== BACKGROUND_COMMAND) }
+    }
+    return data
   }
 
   async sendExtensionUiResponse(response: PiExtensionUiResponse): Promise<void> {
     await this.writeLine(`${JSON.stringify({ type: 'extension_ui_response', ...response })}\n`)
   }
 
-  private request(cmd: PiRpcCommand, opts?: { timeoutMs?: number }): Promise<PiRpcResponse> {
+  private request(cmd: PiRpcCommand, timeoutMs?: number, cleanup = false): Promise<PiRpcResponse> {
+    if (this.disposed) return Promise.reject(new Error('pi process is disposed'))
+    if (this.needsRestart) return this.ensureRunning().then(() => this.request(cmd, timeoutMs, cleanup))
+    if (this.terminalError && !cleanup) return Promise.reject(this.terminalError)
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
-    const timeoutMs = opts?.timeoutMs
 
     const line = `${JSON.stringify(withId)}\n`
 
     return new Promise<PiRpcResponse>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined
-
-      // Returns false when the id was already dropped (e.g. by the timeout), so the
-      // caller can avoid settling the promise twice.
       const drop = (): boolean => {
         if (timer !== undefined) {
           clearTimeout(timer)
@@ -402,18 +617,18 @@ export class PiRpcProcess {
           if (!this.pending.delete(id)) return
           reject(new Error(`pi ${cmd.type} timed out after ${timeoutMs}ms`))
         }, timeoutMs)
-        // Never let an auxiliary request keep the event loop alive.
         timer.unref?.()
       }
 
-      void this.writeLine(line).catch(error => {
+      void this.writeLine(line, cleanup).catch(error => {
         if (!drop()) return
         reject(error)
       })
     })
   }
 
-  private writeLine(line: string): Promise<void> {
+  private writeLine(line: string, cleanup = false): Promise<void> {
+    if (this.terminalError && !cleanup) return Promise.reject(this.terminalError)
     return new Promise<void>((resolve, reject) => {
       try {
         this.child.stdin.write(line, error => {

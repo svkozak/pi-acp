@@ -49,34 +49,30 @@ const output = new ReadableStream<Uint8Array>({
 
 const stream = ndJsonStream(input, output)
 
-const agent = new AgentSideConnection(conn => new PiAcpAgent(conn), stream)
+let agent: PiAcpAgent
+const connection = new AgentSideConnection(conn => {
+  agent = new PiAcpAgent(conn)
+  return agent
+}, stream)
 
-function shutdown() {
+let shuttingDown = false
+async function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
   try {
-    // Best-effort: dispose session subprocesses when the client disconnects.
-    ;(agent as any)?.agent?.dispose?.()
-  } catch {
-    // ignore
+    await agent.dispose()
+    process.exitCode = 0
+  } catch (error) {
+    process.stderr.write(`pi-acp shutdown: ${error instanceof Error ? error.message : String(error)}\n`)
+    process.exitCode = 1
   }
-  try {
-    process.exit(0)
-  } catch {
-    // ignore
-  }
+  process.exit()
 }
 
+void connection.closed.then(shutdown)
 process.stdin.on('end', shutdown)
 process.stdin.on('close', shutdown)
-
 process.stdin.resume()
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
-
-// Avoid crashing if the client closes stdout early.
-process.stdout.on('error', () => {
-  try {
-    process.exit(0)
-  } catch {
-    // ignore
-  }
-})
+process.stdout.on('error', shutdown)

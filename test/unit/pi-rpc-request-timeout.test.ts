@@ -18,19 +18,20 @@ function makeFakeChild(): FakeChild {
   child.stderr = new PassThrough()
   child.killed = false
   child.kill = () => {}
-  child.stdin = {
-    write: (line: string, cb?: (error?: Error | null) => void) => {
-      written.push(String(line))
-      cb?.(null)
-      return true
-    }
+  child.stdin = new PassThrough()
+  child.stdin.write = (line: string, cb?: (error?: Error | null) => void) => {
+    written.push(String(line))
+    cb?.(null)
+    return true
   }
   return { child, stdout, written }
 }
 
 // The constructor is private in TS only; tests drive it directly to avoid spawning `pi`.
 function makeProcess(child: any): PiRpcProcess {
-  return new (PiRpcProcess as unknown as new (c: any) => PiRpcProcess)(child)
+  const proc = new (PiRpcProcess as unknown as new (params: { cwd: string }) => PiRpcProcess)({ cwd: process.cwd() })
+  ;(proc as unknown as { bindChild: (child: any) => void }).bindChild(child)
+  return proc
 }
 
 function pendingSize(proc: PiRpcProcess): number {

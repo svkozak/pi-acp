@@ -11,6 +11,7 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
+import type { BackgroundJob, BackgroundMessage } from '../pi-rpc/background-protocol.js'
 import {
   PiRpcProcess,
   PiRpcSpawnError,
@@ -18,6 +19,7 @@ import {
   type PiRpcEvent,
   type PiSessionStats
 } from '../pi-rpc/process.js'
+import { toPromptError } from './prompt-error.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -42,9 +44,10 @@ type SessionCreateParams = {
   piCommand?: string
 }
 
-export type StopReason = 'end_turn' | 'cancelled' | 'error'
+export type StopReason = 'end_turn' | 'cancelled'
 
 type PendingTurn = {
+  error?: Error
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
 }
@@ -173,8 +176,10 @@ export class SessionManager {
   private readonly store = new SessionStore()
 
   /** Dispose all sessions and their underlying pi subprocesses. */
-  disposeAll(): void {
-    for (const [id] of this.sessions) this.close(id)
+  async disposeAll(): Promise<void> {
+    const results = await Promise.allSettled([...this.sessions.keys()].map(id => this.close(id)))
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure?.status === 'rejected') throw failure.reason
   }
 
   /** Get a registered session if it exists (no throw). */
@@ -186,22 +191,13 @@ export class SessionManager {
    * Dispose a session's underlying pi process and remove it from the manager.
    * Used when clients explicitly reload a session and we want a fresh pi subprocess.
    */
-  close(sessionId: string): void {
-    const s = this.sessions.get(sessionId)
-    if (!s) return
+  async close(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
     try {
-      s.proc.dispose?.()
-    } catch {
-      // ignore
-    }
-    this.sessions.delete(sessionId)
-  }
-
-  /** Close all sessions except the one with `keepSessionId`. */
-  closeAllExcept(keepSessionId: string): void {
-    for (const [id] of this.sessions) {
-      if (id === keepSessionId) continue
-      this.close(id)
+      await session.dispose()
+    } finally {
+      if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId)
     }
   }
 
@@ -294,6 +290,19 @@ export class PiAcpSession {
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
+  private terminalError: Error | undefined
+  private disposed = false
+  private disposal: Promise<void> | undefined
+  private unsubscribe: () => void = () => {}
+  private unsubscribeExit: () => void = () => {}
+  private parentSettled = false
+  private backgroundIdle = true
+  private backgroundSeen = false
+  private cancellationPending = false
+  private failingPrompt = false
+  private activityRevision = 0
+  private readonly backgroundJobs = new Map<string, BackgroundJob>()
+  private readonly completedBackgroundJobs = new Set<string>()
   private readonly turnQueue: QueuedTurn[] = []
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
@@ -332,7 +341,33 @@ export class PiAcpSession {
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.unsubscribe = this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.unsubscribeExit = this.proc.onExit?.(error => this.failOperation(error)) ?? (() => {})
+  }
+
+  dispose(): Promise<void> {
+    return (this.disposal ??= this.disposeSession())
+  }
+
+  private async disposeSession(): Promise<void> {
+    if (this.disposed) return
+    this.cancelRequested = true
+    this.cancellationPending = true
+    ++this.activityRevision
+    try {
+      await this.proc.dispose?.()
+      const turns = [...(this.pendingTurn ? [this.pendingTurn] : []), ...this.turnQueue.splice(0)]
+      this.pendingTurn = null
+      await this.flushEmits()
+      for (const turn of turns) turn.resolve('cancelled')
+    } catch (error) {
+      this.failOperation(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    } finally {
+      this.disposed = true
+      this.unsubscribe()
+      this.unsubscribeExit()
+    }
   }
 
   setStartupInfo(text: string) {
@@ -356,6 +391,8 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+    if (this.terminalError) throw this.terminalError
+    if (this.disposed || this.disposal) throw RequestError.invalidParams(`Session is closed: ${this.sessionId}`)
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
@@ -396,6 +433,8 @@ export class PiAcpSession {
   async cancel(): Promise<void> {
     // Cancel current and clear any queued prompts.
     this.cancelRequested = true
+    this.cancellationPending = this.backgroundSeen || this.proc.backgroundLifecycleEnabled
+    ++this.activityRevision
 
     if (this.turnQueue.length) {
       const queued = this.turnQueue.splice(0, this.turnQueue.length)
@@ -412,21 +451,29 @@ export class PiAcpSession {
     }
 
     // Abort the currently running turn (if any). If nothing is running, this is a no-op.
-    await this.proc.abort()
+    const pendingTurn = this.pendingTurn
+    try {
+      await this.proc.abort()
+    } catch (error) {
+      this.failOperation(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    }
+    if (this.pendingTurn !== pendingTurn || this.terminalError) return
+    this.cancellationPending = false
+    this.finishIfSettled()
   }
 
-  wasCancelRequested(): boolean {
-    return this.cancelRequested
-  }
-
-  private emit(update: SessionUpdate): void {
+  private emit(update: SessionUpdate, isCurrent: () => boolean = () => true): void {
+    if (this.disposed) return
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
       .then(() =>
-        this.conn.sessionUpdate({
-          sessionId: this.sessionId,
-          update
-        })
+        this.disposed || !isCurrent()
+          ? undefined
+          : this.conn.sessionUpdate({
+              sessionId: this.sessionId,
+              update
+            })
       )
       .catch(() => {
         // Ignore notification errors (client may have gone away). We still want
@@ -438,49 +485,24 @@ export class PiAcpSession {
     await this.lastEmit
   }
 
-  /**
-   * Best-effort: publish the real pi context-window occupancy as ACP `usage_update`.
-   * Queued updates are flushed even when the stats query fails or times out, so callers
-   * can await this before resolving `session/prompt`.
-   */
-  async publishContextUsage(): Promise<void> {
+  async publishContextUsage(isCurrent: () => boolean = () => true): Promise<void> {
     try {
-      // Older/stubbed pi processes may not expose the stats RPC at all.
       if (typeof this.proc.getSessionStats === 'function') {
         const update = toUsageUpdate(await this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS))
-        if (update) this.emit(update)
+        if (update) this.emit(update, isCurrent)
       }
     } catch {
-      // Context usage is auxiliary; never fail or delay the turn because of it.
+      // Context usage is auxiliary and must not fail the turn.
     }
 
     await this.flushEmits()
   }
 
-  private async settleTurn(): Promise<void> {
-    // Ensure all updates derived from pi events (plus the final usage update) are
-    // delivered before we resolve the ACP `session/prompt` request.
-    await this.publishContextUsage()
-
-    const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-    this.pendingTurn?.resolve(reason)
-    this.pendingTurn = null
-    this.inAgentLoop = false
-
-    // Start next queued prompt, if any.
-    const next = this.turnQueue.shift()
-    if (next) {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
-      })
-      this.startTurn(next)
-    } else {
-      this.emit({
-        sessionUpdate: 'session_info_update',
-        _meta: { piAcp: { queueDepth: 0, running: false } }
-      })
-    }
+  private emitRunningStatus(running: boolean, isCurrent: () => boolean = () => true): void {
+    this.emit(
+      { sessionUpdate: 'session_info_update', _meta: { piAcp: { queueDepth: this.turnQueue.length, running } } },
+      isCurrent
+    )
   }
 
   private emitBashToolCall(params: {
@@ -540,49 +562,192 @@ export class PiAcpSession {
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
+    this.parentSettled = false
+    this.backgroundIdle = true
+    this.backgroundSeen = false
+    this.cancellationPending = false
+    this.failingPrompt = false
+    ++this.activityRevision
 
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    const pendingTurn = this.pendingTurn
 
     // Publish queue depth (0 because we're starting the turn now).
-    this.emit({
-      sessionUpdate: 'session_info_update',
-      _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
-    })
+    this.emitRunningStatus(true)
 
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
     // continuations may emit multiple `agent_end` events before `agent_settled`.
     this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
-        }
-
-        this.pendingTurn = null
-        this.inAgentLoop = false
-
-        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
-        })
-      })
-      void err
+      if (this.disposed || this.disposal || this.pendingTurn !== pendingTurn || this.terminalError) return
+      void this.failPrompt(maybeAuthRequiredError(err) ?? toPromptError(err))
     })
   }
 
+  private failOperation(error: Error): void {
+    if (this.disposed || this.terminalError) return
+    this.terminalError = maybeAuthRequiredError(error) ?? toPromptError(error)
+    ++this.activityRevision
+    const turns = [...(this.pendingTurn ? [this.pendingTurn] : []), ...this.turnQueue.splice(0)]
+    this.pendingTurn = null
+    for (const job of this.backgroundJobs.values()) this.finishBackgroundJob(job.id, 'failed', error.message)
+    this.emit({ sessionUpdate: 'session_info_update', _meta: { piAcp: { queueDepth: 0, running: false } } })
+    const delivered = this.flushEmits()
+    for (const turn of turns) void delivered.then(() => turn.reject(this.terminalError))
+  }
+
+  private finishBackgroundJob(id: string, status: 'completed' | 'failed', text?: string): void {
+    if (!this.backgroundJobs.delete(id)) return
+    this.completedBackgroundJobs.add(id)
+    this.emit({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: `background:${id}`,
+      status,
+      ...(text ? { content: [{ type: 'content', content: { type: 'text', text } }] } : {})
+    })
+  }
+
+  private updateBackground(message: Extract<BackgroundMessage, { type: 'snapshot' }>): void {
+    ++this.activityRevision
+    if (this.pendingTurn && (!message.idle || message.active.length)) this.emitRunningStatus(true)
+    this.backgroundIdle = message.idle
+    for (const job of message.active) {
+      if (this.backgroundJobs.has(job.id) || this.completedBackgroundJobs.has(job.id)) continue
+      this.backgroundSeen = true
+      this.backgroundJobs.set(job.id, job)
+      this.emit({
+        sessionUpdate: 'tool_call',
+        toolCallId: `background:${job.id}`,
+        title: job.title,
+        kind: 'other',
+        status: 'in_progress'
+      })
+    }
+    if (message.finished) {
+      if (this.backgroundJobs.has(message.finished.id)) {
+        this.finishBackgroundJob(message.finished.id, message.finished.status, message.finished.text)
+      } else if (!this.completedBackgroundJobs.has(message.finished.id)) {
+        this.backgroundSeen = true
+        this.completedBackgroundJobs.add(message.finished.id)
+        this.emit({
+          sessionUpdate: 'tool_call',
+          toolCallId: `background:${message.finished.id}`,
+          title: message.finished.title,
+          kind: 'other',
+          status: message.finished.status,
+          ...(message.finished.text
+            ? { content: [{ type: 'content', content: { type: 'text', text: message.finished.text } }] }
+            : {})
+        })
+      }
+    }
+    this.finishIfSettled()
+  }
+
+  private finishIfSettled(): void {
+    const pendingTurn = this.pendingTurn
+    if (
+      pendingTurn &&
+      this.parentSettled &&
+      pendingTurn.error &&
+      !this.cancelRequested &&
+      !this.failingPrompt &&
+      !this.disposal
+    ) {
+      void this.failPrompt(pendingTurn.error)
+      return
+    }
+    const revision = this.activityRevision
+    const canFinish = () =>
+      this.pendingTurn === pendingTurn &&
+      this.activityRevision === revision &&
+      !this.disposal &&
+      !this.terminalError &&
+      !this.failingPrompt &&
+      !this.cancellationPending &&
+      this.parentSettled &&
+      this.backgroundIdle &&
+      this.backgroundJobs.size === 0
+    if (!pendingTurn || !canFinish()) return
+    void this.flushEmits().then(async () => {
+      if (!canFinish()) return
+      const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+      if (!this.cancelRequested || !this.proc.backgroundLifecycleEnabled) await this.publishContextUsage(canFinish)
+      if (!canFinish()) return
+      this.emitRunningStatus(false, canFinish)
+      await this.flushEmits()
+      if (!canFinish()) return
+      this.pendingTurn = null
+      this.inAgentLoop = false
+      pendingTurn.resolve(reason)
+      const next = this.turnQueue.shift()
+      if (next) this.startTurn(next)
+    })
+  }
+
+  private async failPrompt(error: Error): Promise<void> {
+    const pendingTurn = this.pendingTurn
+    if (!pendingTurn || this.failingPrompt) return
+    this.failingPrompt = true
+    ++this.activityRevision
+    try {
+      if (this.backgroundSeen || this.proc.backgroundLifecycleEnabled) await this.proc.abort()
+    } catch (failure) {
+      this.failOperation(new Error(`${error.message}; cleanup failed: ${String(failure)}`))
+      return
+    }
+    if (this.pendingTurn !== pendingTurn || this.terminalError) return
+    this.emit({ sessionUpdate: 'session_info_update', _meta: { piAcp: { queueDepth: 0, running: false } } })
+    await this.flushEmits()
+    if (this.pendingTurn !== pendingTurn || this.terminalError) return
+    const queued = this.turnQueue.splice(0)
+    this.pendingTurn = null
+    this.inAgentLoop = false
+    for (const turn of [pendingTurn, ...queued]) {
+      if (this.cancelRequested) turn.resolve('cancelled')
+      else turn.reject(error)
+    }
+  }
+
   private handlePiEvent(ev: PiRpcEvent) {
+    if (this.disposed || this.terminalError) return
     const type = String((ev as any).type ?? '')
 
     switch (type) {
+      case 'message_end': {
+        const message = ev.message
+        if (
+          !this.pendingTurn ||
+          !message ||
+          typeof message !== 'object' ||
+          !('role' in message) ||
+          message.role !== 'assistant'
+        )
+          break
+        const reason = stringProp(message, 'stopReason')
+        if (reason === 'error') this.pendingTurn.error = toPromptError(stringProp(message, 'errorMessage'))
+        else if (reason === 'aborted') this.cancelRequested = true
+        else if (reason) this.pendingTurn.error = undefined
+        break
+      }
+
+      case 'background_work': {
+        this.updateBackground(ev as unknown as Extract<BackgroundMessage, { type: 'snapshot' }>)
+        break
+      }
+      case 'background_cancelled': {
+        for (const job of this.backgroundJobs.values()) this.finishBackgroundJob(job.id, 'failed', 'Cancelled')
+        this.cancellationPending = false
+        this.parentSettled = true
+        this.backgroundIdle = true
+        ++this.activityRevision
+        this.finishIfSettled()
+        break
+      }
+      case 'process_error': {
+        this.failOperation(new Error(stringProp(ev, 'message') ?? 'pi process failed'))
+        break
+      }
       case 'message_update': {
         const ame = (ev as any).assistantMessageEvent
 
@@ -855,36 +1020,69 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_end': {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Retry finished, resuming.' } satisfies ContentBlock
-        })
-        break
-      }
-
-      case 'auto_compaction_start': {
+        if (ev.success === false) {
+          if (this.pendingTurn) {
+            const reason = stringProp(ev, 'finalError')?.trim()
+            this.pendingTurn.error = reason
+              ? toPromptError(reason)
+              : (this.pendingTurn.error ?? toPromptError(undefined))
+          }
+          break
+        }
+        if (ev.success !== true) break
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text: 'Context nearing limit, running automatic compaction...'
+            text: 'Retry finished, resuming.'
           } satisfies ContentBlock
         })
         break
       }
 
-      case 'auto_compaction_end': {
+      case 'compaction_start':
+      case 'auto_compaction_start': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text: 'Automatic compaction finished; context was summarized to continue the session.'
+            text:
+              ev.reason === 'manual'
+                ? 'Compacting context...'
+                : 'Context nearing limit, running automatic compaction...'
+          } satisfies ContentBlock
+        })
+        break
+      }
+
+      case 'compaction_end':
+      case 'auto_compaction_end': {
+        if (ev.aborted === true) {
+          if (this.pendingTurn) this.pendingTurn.error = toPromptError('Compaction was cancelled.')
+          break
+        }
+        if (typeof ev.errorMessage === 'string' || ev.result === null) {
+          if (this.pendingTurn) this.pendingTurn.error = toPromptError(ev.errorMessage)
+          break
+        }
+        if (!ev.result) break
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text:
+              ev.reason === 'manual'
+                ? 'Compaction finished; context was summarized.'
+                : 'Automatic compaction finished; context was summarized to continue the session.'
           } satisfies ContentBlock
         })
         break
       }
 
       case 'agent_start': {
+        ++this.activityRevision
+        if (this.pendingTurn) this.emitRunningStatus(true)
+        this.parentSettled = false
         this.inAgentLoop = true
         break
       }
@@ -903,7 +1101,9 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
-        void this.settleTurn()
+        this.parentSettled = true
+        ++this.activityRevision
+        this.finishIfSettled()
         break
       }
 
