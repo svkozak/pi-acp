@@ -124,7 +124,13 @@ export class PiRpcProcess {
         // pi may emit a human-readable prelude on stdout before NDJSON starts.
         // Capture it so the ACP adapter can surface it on session start.
         const cleaned = stripAnsi(String(line)).trimEnd()
-        if (cleaned) this.preludeLines.push(cleaned)
+        if (cleaned) {
+          this.preludeLines.push(cleaned)
+          // Also route pi's real startup diagnostics to the adapter's stderr, which ACP hosts
+          // record; quietStartup still suppresses the synthetic banner in the conversation.
+          process.stderr.write(`${cleaned}
+`)
+        }
         return
       }
 
@@ -206,8 +212,10 @@ export class PiRpcProcess {
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
 
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
+    child.stderr.on('data', (data: Buffer) => {
+      // pi writes extension load failures and other diagnostics to stderr: forward them to the
+      // adapter's stderr so the ACP host can capture them (they were dropped before).
+      process.stderr.write(data)
     })
 
     const proc = new PiRpcProcess(child)
