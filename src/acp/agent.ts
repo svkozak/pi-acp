@@ -982,6 +982,9 @@ export class PiAcpAgent implements ACPAgent {
     // Replay full conversation history.
     const data = (await proc.getMessages()) as any
     const messages = Array.isArray(data?.messages) ? data.messages : []
+    // A toolResult message carries only the output; the call's arguments live on the assistant
+    // message's toolCall block with the same id. Keep them so replayed tool calls show what ran.
+    const toolInputs = new Map<string, unknown>()
 
     for (const m of messages) {
       const role = String(m?.role ?? '')
@@ -1000,6 +1003,11 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       if (role === 'assistant') {
+        for (const block of Array.isArray(m?.content) ? m.content : []) {
+          if (block?.type === 'toolCall' && typeof block.id === 'string') {
+            toolInputs.set(block.id, block.arguments)
+          }
+        }
         const text = normalizePiAssistantText(m?.content)
         if (text) {
           await this.conn.sessionUpdate({
@@ -1015,6 +1023,7 @@ export class PiAcpAgent implements ACPAgent {
       if (role === 'toolResult') {
         const toolName = String((m as any)?.toolName ?? 'tool')
         const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
+        const toolInput = toolInputs.get(toolCallId)
         const isError = Boolean((m as any)?.isError)
         const isBash = isBashTool(toolName)
 
@@ -1025,9 +1034,10 @@ export class PiAcpAgent implements ACPAgent {
             update: {
               sessionUpdate: 'tool_call',
               toolCallId,
-              title: bashCommand(m) ?? toolName,
+              title: bashCommand(toolInput) ?? bashCommand(m) ?? toolName,
               kind: 'execute',
-              status: 'completed',
+              status: isError ? 'failed' : 'completed',
+              rawInput: toolInput ?? null,
               content: bashTerminalContent(toolCallId),
               _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
             }
@@ -1056,8 +1066,8 @@ export class PiAcpAgent implements ACPAgent {
             toolCallId,
             title: toolName,
             kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
-            status: 'completed',
-            rawInput: null,
+            status: isError ? 'failed' : 'completed',
+            rawInput: toolInput ?? null,
             rawOutput: m
           }
         })
