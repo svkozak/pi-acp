@@ -45,6 +45,7 @@ type SessionCreateParams = {
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
 
 type PendingTurn = {
+  title?: string
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
 }
@@ -52,6 +53,7 @@ type PendingTurn = {
 type QueuedTurn = {
   message: string
   images: unknown[]
+  title?: string
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
 }
@@ -241,7 +243,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      autoTitle: true
     })
 
     this.sessions.set(sessionId, session)
@@ -268,7 +271,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      autoTitle: false
     })
 
     this.sessions.set(sessionId, session)
@@ -283,6 +287,9 @@ export class PiAcpSession {
 
   private startupInfo: string | null = null
   private startupInfoSent = false
+  private initialTitlePending: boolean
+  private lastPublishedTitle: string | null | undefined
+  private titleUpdateQueue: Promise<void> = Promise.resolve()
 
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
@@ -324,6 +331,7 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    autoTitle?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -331,6 +339,7 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.initialTitlePending = opts.autoTitle ?? false
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -355,12 +364,12 @@ export class PiAcpSession {
     })
   }
 
-  async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+  async prompt(message: string, images: unknown[] = [], title?: string): Promise<StopReason> {
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
+      const queued: QueuedTurn = { message: expandedMessage, images, title, resolve, reject }
 
       // If a turn is already running, enqueue.
       if (this.pendingTurn) {
@@ -417,6 +426,51 @@ export class PiAcpSession {
 
   wasCancelRequested(): boolean {
     return this.cancelRequested
+  }
+
+  async setSessionName(name: string): Promise<void> {
+    return this.enqueueTitleUpdate(async () => {
+      await this.proc.setSessionName(name)
+      this.publishTitle(name)
+    })
+  }
+
+  private enqueueTitleUpdate(update: () => Promise<void>): Promise<void> {
+    const result = this.titleUpdateQueue.then(update)
+    this.titleUpdateQueue = result.catch(() => {})
+    return result
+  }
+
+  private publishTitle(title: string | null): void {
+    if (this.lastPublishedTitle === title) return
+    this.lastPublishedTitle = title
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      title,
+      updatedAt: new Date().toISOString()
+    })
+  }
+
+  private async maybeAutoTitle(title?: string): Promise<void> {
+    if (!this.initialTitlePending || !title) return
+    this.initialTitlePending = false
+
+    try {
+      await this.enqueueTitleUpdate(async () => {
+        const state = (await this.proc.getState()) as { sessionName?: unknown } | null
+        const currentTitle = typeof state?.sessionName === 'string' ? state.sessionName.trim() : ''
+        if (currentTitle) {
+          this.publishTitle(currentTitle)
+          return
+        }
+        if (this.lastPublishedTitle) return
+
+        await this.proc.setSessionName(title)
+        this.publishTitle(title)
+      })
+    } catch {
+      // Auto-titling is best-effort and must not fail the completed prompt.
+    }
   }
 
   private emit(update: SessionUpdate): void {
@@ -541,7 +595,8 @@ export class PiAcpSession {
     this.cancelRequested = false
     this.inAgentLoop = false
 
-    this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    this.pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject }
+    void this.maybeAutoTitle(t.title)
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
@@ -583,6 +638,12 @@ export class PiAcpSession {
     const type = String((ev as any).type ?? '')
 
     switch (type) {
+      case 'session_info_changed': {
+        const name = typeof (ev as { name?: unknown }).name === 'string' ? String((ev as { name: string }).name) : null
+        this.publishTitle(name)
+        break
+      }
+
       case 'message_update': {
         const ame = (ev as any).assistantMessageEvent
 

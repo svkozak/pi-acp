@@ -40,7 +40,7 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { promptToPiMessage } from './translate/prompt.js'
+import { promptToPiMessage, promptToSessionTitle } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
@@ -532,7 +532,7 @@ export class PiAcpAgent implements ACPAgent {
         }
 
         try {
-          await session.proc.setSessionName(name)
+          await session.setSessionName(name)
         } catch (e: any) {
           const msg = String(e?.message ?? e)
           const hint = /set_session_name/i.test(msg)
@@ -548,15 +548,6 @@ export class PiAcpAgent implements ACPAgent {
           })
           return { stopReason: 'end_turn' }
         }
-
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'session_info_update',
-            title: name,
-            updatedAt: new Date().toISOString()
-          }
-        })
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -890,7 +881,7 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const result = await session.prompt(message, images)
+    const result = await session.prompt(message, images, promptToSessionTitle(params.prompt) ?? undefined)
 
     // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
     // unless we know this was a cancellation.
