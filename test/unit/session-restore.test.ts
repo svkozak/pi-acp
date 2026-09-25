@@ -38,10 +38,7 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
       promptCalls.push({ message, images })
       return 'end_turn'
     },
-    async cancel() {},
-    wasCancelRequested() {
-      return false
-    }
+    async cancel() {}
   }))
 
   const originalSpawn = PiRpcProcess.spawn

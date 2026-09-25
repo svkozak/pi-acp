@@ -18,6 +18,14 @@ Expect some minor breaking changes.
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
   - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
   - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) on completion when possible
+- Concurrent sessions keep independent pi subprocesses alive within one ACP connection
+  - `session/close` cancels pending turns and frees only that session, preserving its history
+  - Reloading the same session replaces its process and cancels its pending turns; disconnecting frees all active sessions
+  - An unexpected pi process exit rejects pending prompts instead of leaving them waiting
+- Failed prompts use the client's native ACP error presentation, including the provider's error reason
+  - Automatic retries can recover before the prompt is reported as failed; cancellation remains a cancellation
+  - A final failure clears queued prompts and allows a new prompt in the same session when pi is still running
+  - Zed displays these failures in its styled error callout, separate from assistant output
 - Session persistence
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
   - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
