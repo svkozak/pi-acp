@@ -884,6 +884,20 @@ export class PiAcpSession {
         break
       }
 
+      case 'message_end': {
+        // pi reports provider failures only on the final assistant message; without this the
+        // prompt resolves as a clean end_turn and the client never sees why output stopped.
+        const msg = (ev as any).message
+        if (msg?.role === 'assistant' && msg.stopReason === 'error') {
+          const reason = typeof msg.errorMessage === 'string' && msg.errorMessage ? msg.errorMessage : 'Unknown error'
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `\n\nError: ${reason}` } satisfies ContentBlock
+          })
+        }
+        break
+      }
+
       case 'agent_start': {
         this.inAgentLoop = true
         break

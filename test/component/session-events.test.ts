@@ -1100,3 +1100,32 @@ test('PiAcpSession: cancelled turn still reports cancelled after usage publish',
     [{ sessionUpdate: 'usage_update', used: 42, size: 100 }]
   )
 })
+
+test('PiAcpSession: surfaces assistant error from message_end as agent_message_chunk', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'message_end',
+    message: { role: 'assistant', stopReason: 'error', errorMessage: 'Context size has been exceeded.', content: [] }
+  })
+  proc.emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [] } })
+  proc.emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'aborted', content: [] } })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.deepEqual(conn.updates[0]!.update, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '\n\nError: Context size has been exceeded.' }
+  })
+})
