@@ -316,6 +316,17 @@ export class PiAcpSession {
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
+  private emitQueueDepth = 0
+  private deliveryLatencyMs = 0
+  private deltaBuffer: {
+    sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk'
+    text: string
+  } | null = null
+  private deltaFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+  private static readonly deltaFlushMinMs = 100
+  private static readonly deltaFlushMaxMs = 250
+  private static readonly deltaFlushMaxChars = 16 * 1024
 
   constructor(opts: {
     sessionId: string
@@ -419,22 +430,78 @@ export class PiAcpSession {
     return this.cancelRequested
   }
 
-  private emit(update: SessionUpdate): void {
+  private emitImmediate(update: SessionUpdate): void {
     // Serialize update delivery.
+    this.emitQueueDepth += 1
     this.lastEmit = this.lastEmit
-      .then(() =>
-        this.conn.sessionUpdate({
+      .then(async () => {
+        const startedAt = Date.now()
+        await this.conn.sessionUpdate({
           sessionId: this.sessionId,
           update
         })
-      )
+        const elapsed = Date.now() - startedAt
+        this.deliveryLatencyMs = this.deliveryLatencyMs
+          ? this.deliveryLatencyMs * 0.75 + elapsed * 0.25
+          : elapsed
+      })
       .catch(() => {
         // Ignore notification errors (client may have gone away). We still want
         // prompt completion.
       })
+      .finally(() => {
+        this.emitQueueDepth = Math.max(0, this.emitQueueDepth - 1)
+      })
+  }
+
+  private deltaFlushDelayMs(): number {
+    // Adapt to both queued notifications and slow delivery. This keeps fast
+    // clients responsive while preventing token-rate producers from creating
+    // an unbounded promise and transport backlog.
+    const pressure = Math.max(this.emitQueueDepth, Math.ceil(this.deliveryLatencyMs / 20))
+    return Math.min(PiAcpSession.deltaFlushMaxMs, PiAcpSession.deltaFlushMinMs * Math.max(1, pressure))
+  }
+
+  private flushDeltaBuffer(): void {
+    if (this.deltaFlushTimer) {
+      clearTimeout(this.deltaFlushTimer)
+      this.deltaFlushTimer = null
+    }
+    const buffered = this.deltaBuffer
+    this.deltaBuffer = null
+    if (!buffered) return
+    this.emitImmediate({
+      sessionUpdate: buffered.sessionUpdate,
+      content: { type: 'text', text: buffered.text } satisfies ContentBlock
+    })
+  }
+
+  private emitDelta(
+    sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk',
+    text: string
+  ): void {
+    if (!text) return
+    if (this.deltaBuffer && this.deltaBuffer.sessionUpdate !== sessionUpdate) this.flushDeltaBuffer()
+    if (!this.deltaBuffer) this.deltaBuffer = { sessionUpdate, text: '' }
+    this.deltaBuffer.text += text
+    if (this.deltaBuffer.text.length >= PiAcpSession.deltaFlushMaxChars) {
+      this.flushDeltaBuffer()
+      return
+    }
+    if (!this.deltaFlushTimer) {
+      this.deltaFlushTimer = setTimeout(() => this.flushDeltaBuffer(), this.deltaFlushDelayMs())
+    }
+  }
+
+  private emit(update: SessionUpdate): void {
+    // Structured events are ordering boundaries. Flush all preceding model
+    // text before queueing the event, then start a fresh delta batch afterward.
+    this.flushDeltaBuffer()
+    this.emitImmediate(update)
   }
 
   private async flushEmits(): Promise<void> {
+    this.flushDeltaBuffer()
     await this.lastEmit
   }
 
@@ -588,18 +655,12 @@ export class PiAcpSession {
 
         // Stream assistant text.
         if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
-          this.emit({
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: ame.delta } satisfies ContentBlock
-          })
+          this.emitDelta('agent_message_chunk', ame.delta)
           break
         }
 
         if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string') {
-          this.emit({
-            sessionUpdate: 'agent_thought_chunk',
-            content: { type: 'text', text: ame.delta } satisfies ContentBlock
-          })
+          this.emitDelta('agent_thought_chunk', ame.delta)
           break
         }
 

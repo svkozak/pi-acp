@@ -24,7 +24,7 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
     assistantMessageEvent: { type: 'text_delta', delta: 'hi' }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setTimeout(r, 130))
 
   assert.equal(conn.updates.length, 1)
   assert.equal(conn.updates[0]!.sessionId, 's1')
@@ -52,7 +52,7 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
     assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking...' }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setTimeout(r, 130))
 
   assert.equal(conn.updates.length, 1)
   assert.equal(conn.updates[0]!.sessionId, 's1')
@@ -60,6 +60,61 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
     sessionUpdate: 'agent_thought_chunk',
     content: { type: 'text', text: 'thinking...' }
   })
+})
+
+test('PiAcpSession: coalesces a burst of adjacent text deltas', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  for (const delta of ['one', ' ', 'two', ' ', 'three']) {
+    proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta } })
+  }
+
+  await new Promise(r => setTimeout(r, 130))
+
+  assert.equal(conn.updates.length, 1)
+  assert.deepEqual(conn.updates[0]!.update, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'one two three' }
+  })
+})
+
+test('PiAcpSession: batches deltas while slow ACP delivery applies backpressure', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.sessionUpdateDelayMs = 80
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  for (let i = 0; i < 40; i++) {
+    proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: `${i},` } })
+    await new Promise(r => setTimeout(r, 5))
+  }
+  proc.emit({ type: 'agent_settled' })
+  await new Promise(r => setTimeout(r, 400))
+
+  const chunks = conn.updates.filter(update => update.update.sessionUpdate === 'agent_message_chunk')
+  assert.ok(chunks.length < 10, `expected fewer than 10 coalesced chunks, got ${chunks.length}`)
+  assert.equal(
+    chunks.map(update => (update.update as any).content.text).join(''),
+    Array.from({ length: 40 }, (_, i) => `${i},`).join('')
+  )
 })
 
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {
@@ -461,7 +516,7 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
   proc.emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 2000 } as any)
   proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'after' } })
 
-  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setTimeout(r, 220))
 
   assert.deepEqual(
     conn.updates.map(u => u.update),
