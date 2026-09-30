@@ -115,6 +115,8 @@ Point your ACP client to the built `dist/index.js`:
 
 ### Environment variables
 
+- `PI_ACP_PI_ARGS` is a JSON array of arguments prepended to the spawned `pi --mode rpc` command. Arguments are passed directly without shell parsing.
+- `PI_ACP_QUIET_STARTUP=0|1` overrides the `quietStartup` setting without modifying pi settings files.
 - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.

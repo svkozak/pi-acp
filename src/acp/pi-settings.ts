@@ -62,6 +62,12 @@ export function getEnableSkillCommands(cwd: string): boolean {
  * We use it to decide whether to synthesize + emit our own "startup info" message.
  */
 export function getQuietStartup(cwd: string): boolean {
+  if (process.env.PI_ACP_QUIET_STARTUP !== undefined) {
+    if (!['0', '1'].includes(process.env.PI_ACP_QUIET_STARTUP)) {
+      throw new Error('PI_ACP_QUIET_STARTUP must be 0 or 1')
+    }
+    return process.env.PI_ACP_QUIET_STARTUP === '1'
+  }
   const merged = getMergedSettings(cwd)
 
   const direct = merged.quietStartup
