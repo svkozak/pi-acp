@@ -181,15 +181,77 @@ pi-acp --terminal-login
 
 Your ACP client can also invoke this automatically based on the agent's advertised `authMethods`.
 
-## Development
+## Development Environment
 
-```bash
-npm install
-npm run dev        # run from src via tsx
-npm run build
-npm run lint
-npm run test
+To develop from source, you need Node.js 22+ (with npm) and `pi` v0.81.0+ on your `PATH`. The adapter launches `pi` as a separate process; configure pi's model provider authentication separately by running `pi` in a terminal. Choose either setup path below.
+
+<details>
+<summary>Install the tools manually</summary>
+
+Install [Node.js 22+](https://nodejs.org/en/download) and then install pi:
+
+```sh
+npm install -g @earendil-works/pi-coding-agent
+node --version
+pi --version
 ```
+
+</details>
+
+Or use [Nix](https://nix.dev/), a package manager that loads the tool versions pinned by this repository's `flake.lock`. The flake provides Node.js 24 (with npm), Git, and `pi` from `@earendil-works/pi-coding-agent`.
+
+<details>
+<summary>Install Nix and enable flakes</summary>
+
+Follow the official [Nix installation](https://nixos.org/download/) and [flakes](https://nix.dev/concepts/flakes) guides for your operating system. For a multi-user Linux installation in bash:
+
+```sh
+sh <(curl --proto '=https' --tlsv1.2 -L https://nixos.org/nix/install) --daemon
+```
+
+If flakes are not already enabled, add them to your user configuration:
+
+```sh
+mkdir -p ~/.config/nix
+printf 'experimental-features = nix-command flakes\n' >> ~/.config/nix/nix.conf
+```
+
+</details>
+
+From the repository root, enter the environment with `nix develop`. To load it automatically whenever you enter this directory, set up direnv instead:
+
+<details>
+<summary>Set up direnv for automatic loading (optional)</summary>
+
+Install [direnv](https://direnv.net/docs/installation.html) and [nix-direnv](https://github.com/nix-community/nix-direnv) through Nix:
+
+```sh
+nix profile install nixpkgs#direnv nixpkgs#nix-direnv
+mkdir -p ~/.config/direnv
+printf 'source $HOME/.nix-profile/share/nix-direnv/direnvrc\n' >> ~/.config/direnv/direnvrc
+```
+
+Enable the [direnv shell hook](https://direnv.net/docs/hook.html) and restart your shell. For bash:
+
+```sh
+printf 'eval "$(direnv hook bash)"\n' >> ~/.bashrc
+```
+
+Run `direnv allow` once from the repository root. The project's `.envrc` then activates the Nix environment when you enter the directory. No project `.env` file is required.
+
+</details>
+
+After installing manually or entering the Nix environment, install project dependencies and run checks:
+
+```sh
+npm ci
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+Run `npm run dev` separately to start the ACP server from source (it waits for an ACP client over stdio).
 
 Project layout:
 

@@ -2,6 +2,7 @@ node_modules
 .dist
 .dist-cache
 dist
+.direnv/
 *.log
 
 # ESLint cache
