@@ -33,6 +33,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { piCompletionStopReason } from './translate/pi-stop-reason.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -42,7 +43,7 @@ type SessionCreateParams = {
   piCommand?: string
 }
 
-export type StopReason = 'end_turn' | 'cancelled' | 'error'
+export type StopReason = 'end_turn' | 'max_tokens' | 'cancelled' | 'error'
 
 type PendingTurn = {
   title?: string
@@ -66,6 +67,8 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
+const CONTEXT_SAFETY_TOKENS = 4_096
+const MAX_OUTPUT_HEADROOM_TOKENS = 32_768
 
 /**
  * Map pi's `stats.contextUsage` to an ACP `usage_update`. Returns null whenever pi
@@ -298,6 +301,8 @@ export class PiAcpSession {
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   private cancelRequested = false
+  private completedStopReason: StopReason = 'end_turn'
+  private contextUsage: { used: number; size: number } | null = null
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
@@ -498,18 +503,24 @@ export class PiAcpSession {
    * Queued updates are flushed even when the stats query fails or times out, so callers
    * can await this before resolving `session/prompt`.
    */
-  async publishContextUsage(): Promise<void> {
+  async publishContextUsage(): Promise<{ used: number; size: number } | null> {
+    let usage: { used: number; size: number } | null = null
     try {
       // Older/stubbed pi processes may not expose the stats RPC at all.
       if (typeof this.proc.getSessionStats === 'function') {
         const update = toUsageUpdate(await this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS))
-        if (update) this.emit(update)
+        if (update && update.sessionUpdate === 'usage_update') {
+          usage = { used: update.used, size: update.size }
+          this.contextUsage = usage
+          this.emit(update)
+        }
       }
     } catch {
       // Context usage is auxiliary; never fail or delay the turn because of it.
     }
 
     await this.flushEmits()
+    return usage
   }
 
   private async settleTurn(): Promise<void> {
@@ -517,7 +528,7 @@ export class PiAcpSession {
     // delivered before we resolve the ACP `session/prompt` request.
     await this.publishContextUsage()
 
-    const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+    const reason: StopReason = this.cancelRequested ? 'cancelled' : this.completedStopReason
     this.pendingTurn?.resolve(reason)
     this.pendingTurn = null
     this.inAgentLoop = false
@@ -594,6 +605,7 @@ export class PiAcpSession {
 
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
+    this.completedStopReason = 'end_turn'
     this.inAgentLoop = false
 
     this.pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject }
@@ -608,9 +620,15 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
     // continuations may emit multiple `agent_end` events before `agent_settled`.
-    this.proc.prompt(t.message, t.images).catch(err => {
+    void this.promptWithContextGuard(t).catch(err => {
       // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
+      if (err instanceof Error && err.message.startsWith('Pi could not compact')) {
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: err.message }
+        })
+      }
       void this.flushEmits().finally(() => {
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
         const authErr = maybeAuthRequiredError(err)
@@ -633,6 +651,35 @@ export class PiAcpSession {
       })
       void err
     })
+  }
+
+  private async promptWithContextGuard(t: QueuedTurn): Promise<void> {
+    const usage = this.contextUsage
+    if (usage && this.needsContextCompaction(usage)) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Context is nearly full; compacting before continuing.' }
+      })
+      try {
+        await this.proc.compact()
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        throw new Error(`Pi could not compact a nearly full context: ${detail}`)
+      }
+      if (this.cancelRequested) throw new Error('cancelled during compaction')
+      this.contextUsage = null
+      const after = await this.publishContextUsage()
+      if (after && this.needsContextCompaction(after)) {
+        throw new Error('Pi compaction left too little context for a useful response')
+      }
+    }
+    if (this.cancelRequested) throw new Error('cancelled before prompt')
+    await this.proc.prompt(t.message, t.images)
+  }
+
+  private needsContextCompaction(usage: { used: number; size: number }): boolean {
+    const headroom = Math.min(MAX_OUTPUT_HEADROOM_TOKENS, Math.floor(usage.size / 4))
+    return usage.size - usage.used - CONTEXT_SAFETY_TOKENS < headroom
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
@@ -924,7 +971,8 @@ export class PiAcpSession {
         break
       }
 
-      case 'auto_compaction_start': {
+      case 'auto_compaction_start':
+      case 'compaction_start': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
@@ -935,12 +983,19 @@ export class PiAcpSession {
         break
       }
 
-      case 'auto_compaction_end': {
+      case 'auto_compaction_end':
+      case 'compaction_end': {
+        const error = stringProp(ev, 'errorMessage')
+        const aborted = ev.aborted === true
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text: 'Automatic compaction finished; context was summarized to continue the session.'
+            text: error
+              ? `Context compaction failed: ${error}`
+              : aborted
+                ? 'Context compaction was cancelled.'
+                : 'Automatic compaction finished; context was summarized to continue the session.'
           } satisfies ContentBlock
         })
         break
@@ -960,6 +1015,7 @@ export class PiAcpSession {
       case 'agent_end': {
         // One low-level run ended. Pi may still retry, compact, or process a queued
         // continuation, so keep the ACP turn open until `agent_settled`.
+        this.completedStopReason = piCompletionStopReason(ev.messages)
         this.inAgentLoop = false
         break
       }

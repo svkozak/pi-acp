@@ -29,6 +29,9 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  compactCount = 0
+  compactError: unknown = null
+  statsAfterCompact: PiSessionStats | null = null
   getSessionStatsCount = 0
 
   sessionStats: PiSessionStats = {}
@@ -52,6 +55,12 @@ export class FakePiRpcProcess {
 
   async abort(): Promise<void> {
     this.abortCount += 1
+  }
+
+  async compact(): Promise<void> {
+    this.compactCount += 1
+    if (this.compactError) throw this.compactError
+    if (this.statsAfterCompact) this.sessionStats = this.statsAfterCompact
   }
 
   async sendExtensionUiResponse(response: unknown): Promise<void> {
