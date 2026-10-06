@@ -2,6 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import crossSpawn from 'cross-spawn'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+import { PI_ACP_MCP_SERVERS_ENV, resolveMcpExtensionPath, serializeMcpServers } from '../mcp/mcp-bridge.js'
+import type { McpServer } from '@agentclientprotocol/sdk'
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -103,6 +105,8 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** ACP-provided MCP servers; bridged into pi via the bundled extension. */
+  mcpServers?: McpServer[]
 }
 
 export class PiRpcProcess {
@@ -162,12 +166,25 @@ export class PiRpcProcess {
     const args = ['--mode', 'rpc', '--no-themes']
     if (params.sessionPath) args.push('--session', params.sessionPath)
 
+    // Bridge ACP session-scoped MCP servers into pi: load the bundled extension
+    // via -e and hand it the server specs through an env var. pi has no native
+    // MCP support, so the extension registers each MCP tool as a pi tool.
+    const env: NodeJS.ProcessEnv = { ...process.env }
+    const mcpSpecs = serializeMcpServers(params.mcpServers)
+    if (mcpSpecs.length) {
+      const extensionPath = resolveMcpExtensionPath()
+      if (extensionPath) {
+        args.push('-e', extensionPath)
+        env[PI_ACP_MCP_SERVERS_ENV] = JSON.stringify(mcpSpecs)
+      }
+    }
+
     // Windows cmd launchers need shell escaping; direct executables use native argv.
     const start = shouldUseShellForPiCommand(cmd) ? crossSpawn : spawn
     const child = start(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env
+      env
     }) as ChildProcessWithoutNullStreams
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
