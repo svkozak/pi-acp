@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync, statSync, openSync, readSync, closeSync, existsSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync, openSync, readSync, closeSync, existsSync, type Stats } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, isAbsolute } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { promptToSessionTitle } from './translate/prompt.js'
 
 export type PiSessionListItem = {
@@ -112,81 +113,59 @@ function parseSessionHeader(firstLine: string): { sessionId: string; cwd: string
   }
 }
 
+function parseSessionInfoName(line: string): string | null {
+  if (!line.includes('"session_info"')) return null
+  try {
+    const obj = JSON.parse(line.trim()) as any
+    return obj?.type === 'session_info' && typeof obj?.name === 'string' ? obj.name.trim() : null
+  } catch {
+    return null
+  }
+}
+
 function pickTitleFromTail(tail: string): string | null {
   // Try to find the *latest* session_info entry (stores the user-provided name).
-  // We scan backwards line-by-line.
   const lines = tail.split(/\r?\n/)
   for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim()
-    if (!line) continue
-    try {
-      const obj = JSON.parse(line) as any
-      if (obj?.type === 'session_info' && typeof obj?.name === 'string') {
-        return obj.name.trim()
-      }
-    } catch {
-      // ignore
-    }
+    const name = parseSessionInfoName(lines[i])
+    if (name !== null) return name
   }
   return null
 }
 
-function scanSessionInfoNameFromFile(path: string): string | null {
-  // Fallback when the session_info entry is older than our tail window.
-  // Scan the whole file line-by-line and remember the last session_info.name.
+function scanLines(path: string, visit: (line: string) => boolean): void {
   const fd = openSync(path, 'r')
   try {
-    const buf = Buffer.alloc(256 * 1024)
+    const buf = Buffer.alloc(DEFAULT_HEAD_BYTES)
+    const decoder = new StringDecoder('utf8')
     let leftover = ''
     let offset = 0
-    let lastName: string | null = null
-
     while (true) {
       const n = readSync(fd, buf, 0, buf.length, offset)
       if (n <= 0) break
       offset += n
-
-      const chunk = leftover + buf.subarray(0, n).toString('utf8')
-      const lines = chunk.split(/\r?\n/)
+      const lines = (leftover + decoder.write(buf.subarray(0, n))).split(/\r?\n/)
       leftover = lines.pop() ?? ''
-
-      for (const line0 of lines) {
-        const line = line0.trim()
-        if (!line) continue
-        try {
-          const obj = JSON.parse(line) as any
-          if (obj?.type === 'session_info' && typeof obj?.name === 'string') {
-            lastName = obj.name.trim()
-          }
-        } catch {
-          // ignore
-        }
-      }
+      for (const line of lines) if (visit(line)) return
     }
+    visit(leftover + decoder.end())
+  } finally {
+    closeSync(fd)
+  }
+}
 
-    // Best-effort: parse leftover if it was a full line without trailing newline.
-    const tailLine = leftover.trim()
-    if (tailLine) {
-      try {
-        const obj = JSON.parse(tailLine) as any
-        if (obj?.type === 'session_info' && typeof obj?.name === 'string') {
-          lastName = obj.name.trim()
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    return lastName
+function scanSessionInfoNameFromFile(path: string): string | null {
+  // Fallback when the session_info entry is older than our tail window.
+  let lastName: string | null = null
+  try {
+    scanLines(path, line => {
+      lastName = parseSessionInfoName(line) ?? lastName
+      return false
+    })
   } catch {
     return null
-  } finally {
-    try {
-      closeSync(fd)
-    } catch {
-      // ignore
-    }
   }
+  return lastName
 }
 
 function pickUpdatedAtFromTail(tail: string): string | null {
@@ -228,46 +207,43 @@ function pickUpdatedAtFromTail(tail: string): string | null {
   return null
 }
 
-function pickFallbackTitleFromHead(path: string): string | null {
-  // Fallback to first user message.
+function titleFromUserMessage(line: string): string | null {
   try {
-    const raw = readFileSync(path, { encoding: 'utf8' })
-    const lines = raw.split(/\r?\n/)
-    for (const line0 of lines.slice(0, 2000)) {
-      const line = line0.trim()
-      if (!line) continue
-      try {
-        const obj = JSON.parse(line) as any
-        if (obj?.type === 'message' && obj?.message?.role === 'user') {
-          const content = obj?.message?.content
-          if (typeof content === 'string') {
-            const title = promptToSessionTitle([{ type: 'text', text: content }])
-            if (title) return title
-          }
-          if (Array.isArray(content)) {
-            const title = promptToSessionTitle(
-              content.filter(
-                (block: unknown): block is { type: 'text'; text: string } =>
-                  typeof block === 'object' &&
-                  block !== null &&
-                  'type' in block &&
-                  block.type === 'text' &&
-                  'text' in block &&
-                  typeof block.text === 'string'
-              )
-            )
-            if (title) return title
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
+    const obj = JSON.parse(line.trim()) as any
+    if (obj?.type !== 'message' || obj?.message?.role !== 'user') return null
+    const content = obj?.message?.content
+    if (typeof content === 'string') return promptToSessionTitle([{ type: 'text', text: content }])
+    if (!Array.isArray(content)) return null
+    return promptToSessionTitle(
+      content.filter(
+        (block: unknown): block is { type: 'text'; text: string } =>
+          typeof block === 'object' &&
+          block !== null &&
+          'type' in block &&
+          block.type === 'text' &&
+          'text' in block &&
+          typeof block.text === 'string'
+      )
+    )
   } catch {
-    // ignore
+    return null
   }
+}
 
-  return null
+function pickFallbackTitleFromHead(path: string): string | null {
+  // Fallback to first user message; stop reading as soon as it is found.
+  let title: string | null = null
+  let count = 0
+  try {
+    scanLines(path, line => {
+      if (++count > 2000) return true
+      title = titleFromUserMessage(line) || null
+      return title !== null
+    })
+  } catch {
+    return null
+  }
+  return title
 }
 
 export function readPiSessionTitle(path: string, tail?: string): string | null {
@@ -279,47 +255,60 @@ export function readPiSessionTitle(path: string, tail?: string): string | null {
   }
 }
 
+function readSessionListItem(file: string, st: Stats): PiSessionListItem | null {
+  const first = readFirstLine(file)
+  if (!first) return null
+  const header = parseSessionHeader(first)
+  if (!header) return null
+
+  let updatedAt: string | null = null
+  let title: string | null = null
+  try {
+    const tail = readTail(file)
+    title = readPiSessionTitle(file, tail)
+    updatedAt = pickUpdatedAtFromTail(tail)
+  } catch {
+    // ignore
+  }
+
+  return {
+    sessionId: header.sessionId,
+    cwd: header.cwd,
+    title,
+    updatedAt: updatedAt ?? st.mtime.toISOString(),
+    sessionFile: file
+  }
+}
+
+type CachedSessionListItem = { mtimeMs: number; size: number; item: PiSessionListItem | null }
+
+let listCache = new Map<string, CachedSessionListItem>()
+
 export function listPiSessions(): PiSessionListItem[] {
   const sessionsDir = getPiSessionsDir()
   const files: string[] = []
   walkJsonlFiles(sessionsDir, files)
 
+  const nextCache = new Map<string, CachedSessionListItem>()
   const items: PiSessionListItem[] = []
 
   for (const file of files) {
-    const first = readFirstLine(file)
-    if (!first) continue
-    const header = parseSessionHeader(first)
-    if (!header) continue
-
-    let updatedAt: string | null = null
-
-    let title: string | null = null
+    let st: Stats
     try {
-      const tail = readTail(file)
-      title = readPiSessionTitle(file, tail)
-      updatedAt = pickUpdatedAtFromTail(tail)
+      st = statSync(file)
     } catch {
-      // ignore
+      continue
     }
 
-    // Fallback for updatedAt when we couldn't parse timestamps from tail.
-    if (!updatedAt) {
-      try {
-        updatedAt = statSync(file).mtime.toISOString()
-      } catch {
-        updatedAt = null
-      }
-    }
-
-    items.push({
-      sessionId: header.sessionId,
-      cwd: header.cwd,
-      title,
-      updatedAt,
-      sessionFile: file
-    })
+    const hit = listCache.get(file)
+    const entry =
+      hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size
+        ? hit
+        : { mtimeMs: st.mtimeMs, size: st.size, item: readSessionListItem(file, st) }
+    nextCache.set(file, entry)
+    if (entry.item) items.push(entry.item)
   }
+  listCache = nextCache
 
   // Sort most recent first.
   items.sort((a, b) => {
