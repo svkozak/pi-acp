@@ -217,6 +217,59 @@ test('process exit after a cancellation preserves the cancelled result', async (
   await assert.rejects(session.prompt('too late'), /session is closed/)
 })
 
+test('duplicate settlement during a delayed usage query does not settle the next turn', { timeout: 2000 }, async t => {
+  const { cwd, agent, procs, sessions } = setup(t)
+  const first = await agent.newSession({ cwd, mcpServers: [] })
+  const proc = procs[0]!
+  let release!: () => void
+  proc.getSessionStats = () =>
+    new Promise(resolve => {
+      release = () => resolve({})
+    })
+  const session = sessions.get(first.sessionId)
+  const one = session.prompt('one')
+  const two = session.prompt('two')
+  let secondSettled = false
+  void two.then(() => {
+    secondSettled = true
+  })
+  proc.emit({ type: 'agent_settled' })
+  const releaseFirst = release
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(release, releaseFirst)
+  releaseFirst()
+  assert.equal(await one, 'end_turn')
+  await tick()
+  assert.equal(secondSettled, false)
+  assert.equal(proc.prompts.length, 2)
+  proc.emit({ type: 'agent_settled' })
+  release()
+  assert.equal(await two, 'end_turn')
+})
+
+for (const ending of ['exit', 'dispose'] as const) {
+  test(`delayed usage settlement cannot restart queued work after ${ending}`, { timeout: 2000 }, async t => {
+    const { cwd, agent, procs, sessions } = setup(t)
+    const first = await agent.newSession({ cwd, mcpServers: [] })
+    const proc = procs[0]!
+    let release!: () => void
+    proc.getSessionStats = () =>
+      new Promise(resolve => {
+        release = () => resolve({})
+      })
+    const session = sessions.get(first.sessionId)
+    const turns = [session.prompt('one'), session.prompt('two')]
+    proc.emit({ type: 'agent_settled' })
+    if (ending === 'exit') proc.emit({ type: 'process_exit', error: 'exited' })
+    else sessions.close(first.sessionId)
+    assert.deepEqual(await Promise.all(turns), ending === 'exit' ? ['end_turn', 'error'] : ['cancelled', 'cancelled'])
+    release()
+    await tick()
+    assert.equal(proc.prompts.length, 1)
+    await assert.rejects(session.prompt('too late'), /session is closed/)
+  })
+}
+
 test('an old prompt rejection cannot settle a newer turn', async () => {
   const proc = new FakePiRpcProcess()
   const conn = new FakeAgentSideConnection()

@@ -6,6 +6,18 @@ export type PiImage = {
   data: string
 }
 
+export function promptToSessionTitle(blocks: ContentBlock[]): string | null {
+  const normalized = blocks
+    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+    .map(block => block.text)
+    .join(' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+
+  if (!normalized) return null
+  return Array.from(normalized).slice(0, 80).join('')
+}
+
 export function promptToPiMessage(blocks: ContentBlock[]): {
   message: string
   images: PiImage[]

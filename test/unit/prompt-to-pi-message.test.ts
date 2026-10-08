@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { promptToPiMessage } from '../../src/acp/translate/prompt.js'
+import { promptToPiMessage, promptToSessionTitle } from '../../src/acp/translate/prompt.js'
 
 test('promptToPiMessage: concatenates text and resource links', () => {
   const { message, images } = promptToPiMessage([
@@ -11,6 +11,29 @@ test('promptToPiMessage: concatenates text and resource links', () => {
 
   assert.equal(message, 'Hello\n[Context] file:///tmp/foo.txt world')
   assert.deepEqual(images, [])
+})
+
+test('promptToSessionTitle: normalizes text blocks and ignores non-text context', () => {
+  const title = promptToSessionTitle([
+    { type: 'text', text: '  Fix\n\tthe ' },
+    { type: 'resource_link', uri: 'file:///tmp/foo.txt', name: 'foo' },
+    { type: 'text', text: ' thread  title ' }
+  ])
+
+  assert.equal(title, 'Fix the thread title')
+})
+
+test('promptToSessionTitle: limits titles to 80 Unicode characters', () => {
+  const title = promptToSessionTitle([{ type: 'text', text: `  ${'😀'.repeat(81)}  ` }])
+
+  assert.equal(Array.from(title ?? '').length, 80)
+  assert.equal(title, '😀'.repeat(80))
+})
+
+test('promptToSessionTitle: returns null without text', () => {
+  const title = promptToSessionTitle([{ type: 'resource_link', uri: 'file:///tmp/foo.txt', name: 'foo' }])
+
+  assert.equal(title, null)
 })
 
 test('promptToPiMessage: includes embedded resource text as marker', () => {

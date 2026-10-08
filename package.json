@@ -1,6 +1,6 @@
 {
   "name": "pi-acp",
-  "version": "0.0.33",
+  "version": "0.0.34",
   "description": "ACP adapter for pi coding agent",
   "license": "MIT",
   "author": "Sergii Kozak <svkozak@gmail.com>",
@@ -47,10 +47,12 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.26.0",
+    "cross-spawn": "^7.0.6",
     "zod": "^3.25.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.0.0",
     "eslint": "^9.17.0",
     "globals": "^15.14.0",

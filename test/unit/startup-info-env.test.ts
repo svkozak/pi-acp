@@ -37,6 +37,9 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
       sessionId: 's1',
       cwd: process.cwd(),
       proc: {
+        async getAvailableThinkingLevels() {
+          return ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+        },
         async getAvailableModels() {
           return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
         },

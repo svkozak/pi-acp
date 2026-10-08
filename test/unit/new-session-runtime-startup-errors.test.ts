@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
@@ -97,3 +97,52 @@ test('PiAcpAgent: newSession returns Internal error on non-auth model probe fail
 
   assert.deepEqual(sessions.closeCalls, ['s-internal'])
 })
+
+for (const failure of ['discovery', 'auth', 'invalid-current', 'inconsistent-current', 'state']) {
+  test(`PiAcpAgent: cleans up only the new session after ${failure} configuration failure`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-acp-thinking-failure-'))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    const sessionFile = join(root, 'failed.jsonl')
+    const existingFile = join(root, 'existing.jsonl')
+    writeFileSync(sessionFile, 'new session\n')
+    writeFileSync(existingFile, 'existing session\n')
+    const store = new SessionStore(join(root, 'map.json'))
+    store.upsert({ sessionId: 'failed', cwd: root, sessionFile })
+    store.upsert({ sessionId: 'existing', cwd: root, sessionFile: existingFile })
+    const session = {
+      sessionId: 'failed',
+      cwd: root,
+      proc: {
+        async getAvailableModels() {
+          return { models: [{ provider: 'test', id: 'model' }] }
+        },
+        async getState() {
+          if (failure === 'state') throw new Error('state read failed')
+          return {
+            sessionFile,
+            thinkingLevel: failure === 'invalid-current' ? '' : failure === 'inconsistent-current' ? 'medium' : 'max'
+          }
+        },
+        async getAvailableThinkingLevels() {
+          if (failure === 'discovery') throw new Error('discovery failed')
+          if (failure === 'auth') throw new Error('Authentication required: missing key')
+          return ['low', 'high', 'max']
+        }
+      }
+    }
+    const sessions = new FakeSessions(session)
+    const conn = new FakeAgentSideConnection()
+    const agent = new PiAcpAgent(asAgentConn(conn))
+    Reflect.set(agent, 'sessions', sessions)
+    Reflect.set(agent, 'store', store)
+    await assert.rejects(agent.newSession({ cwd: root, mcpServers: [] }), {
+      code: failure === 'auth' ? -32000 : -32603
+    })
+    assert.deepEqual(sessions.closeCalls, ['failed'])
+    assert.equal(existsSync(sessionFile), false)
+    assert.equal(store.get('failed'), null)
+    assert.equal(existsSync(existingFile), true)
+    assert.equal(store.get('existing')?.sessionFile, existingFile)
+    assert.deepEqual(conn.updates, [])
+  })
+}

@@ -1,5 +1,5 @@
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
-import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
+import type { PiRpcEvent, PiSessionStats } from '../../src/pi-rpc/process.js'
 
 type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
@@ -36,6 +36,12 @@ export class FakePiRpcProcess {
     this.emit({ type: 'process_exit', error: 'pi process exited (code=null, signal=SIGTERM)' })
   }
 
+  getSessionStatsCount = 0
+
+  sessionStats: PiSessionStats = {}
+  /** When set, `getSessionStats()` rejects with this error. */
+  sessionStatsError: unknown = null
+
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
     return () => {
@@ -67,12 +73,22 @@ export class FakePiRpcProcess {
     return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
   }
 
+  async getAvailableThinkingLevels(): Promise<string[]> {
+    return ['medium', 'high']
+  }
+
   async getMessages(): Promise<any> {
     return { messages: [] }
   }
 
   async getCommands(): Promise<unknown> {
     return { commands: [] }
+  }
+
+  async getSessionStats(): Promise<PiSessionStats> {
+    this.getSessionStatsCount += 1
+    if (this.sessionStatsError) throw this.sessionStatsError
+    return this.sessionStats
   }
 }
 

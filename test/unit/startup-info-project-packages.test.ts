@@ -41,6 +41,9 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
       sessionId: 's1',
       cwd: projectDir,
       proc: {
+        async getAvailableThinkingLevels() {
+          return ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+        },
         async getAvailableModels() {
           return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
         },

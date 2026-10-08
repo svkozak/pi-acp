@@ -16,7 +16,7 @@ test('PiAcpAgent: setSessionMode maps to pi setThinkingLevel + emits current_mod
   // Create a fake session by calling newSession is heavyweight (spawns pi).
   // Instead, reach into session manager via loadSession isn't possible either.
   // So we unit-test the mapping via a minimal fake session manager would require refactor.
-  // For now we just assert the method exists and rejects unknown mode IDs.
+  // For now we just assert the method exists and rejects unknown session IDs.
 
   await assert.rejects(() => agent.setSessionMode({ sessionId: 'nope', modeId: 'invalid' } as any), /invalid params/i)
 })

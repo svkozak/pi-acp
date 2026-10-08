@@ -39,8 +39,9 @@ const sessionId = 'test-' + process.pid;
 require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
   const command = JSON.parse(line);
   const data = command.type === 'get_state'
-    ? { sessionId, sessionFile: process.cwd() + '/' + sessionId + '.jsonl', model: { provider: 'test', id: 'model' } }
+    ? { sessionId, sessionFile: process.cwd() + '/' + sessionId + '.jsonl', thinkingLevel: 'off', model: { provider: 'test', id: 'model' } }
     : command.type === 'get_available_models' ? { models: [{ provider: 'test', id: 'model' }] }
+    : command.type === 'get_available_thinking_levels' ? { levels: ['off'] }
     : command.type === 'get_messages' ? { messages: [] } : { commands: [] };
   console.log(JSON.stringify({ type: 'response', id: command.id, command: command.type, success: true, data }));
 });

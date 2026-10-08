@@ -33,6 +33,9 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
       sessionId: 's1',
       cwd: process.cwd(),
       proc: {
+        async getAvailableThinkingLevels() {
+          return ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+        },
         async getAvailableModels() {
           return {
             models: [
@@ -85,7 +88,8 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
           { value: 'low', name: 'Thinking: low', description: null },
           { value: 'medium', name: 'Thinking: medium', description: null },
           { value: 'high', name: 'Thinking: high', description: null },
-          { value: 'xhigh', name: 'Thinking: xhigh', description: null }
+          { value: 'xhigh', name: 'Thinking: xhigh', description: null },
+          { value: 'max', name: 'Thinking: max', description: null }
         ]
       }
     ])
@@ -106,6 +110,9 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
     sessionId: 's1',
     cwd: process.cwd(),
     proc: {
+      async getAvailableThinkingLevels() {
+        return ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+      },
       async getAvailableModels() {
         return {
           models: [
@@ -121,6 +128,9 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
         setModelCalls.push({ provider, modelId })
         state.model = { provider, id: modelId }
       }
+    },
+    async publishContextUsage() {
+      // Context usage publishing is covered in test/unit/context-usage.test.ts.
     }
   }
 
@@ -136,6 +146,7 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
   assert.deepEqual(setModelCalls, [{ provider: 'test', modelId: 'beta' }])
   assert.equal(result.configOptions.find(option => option.id === 'model')?.currentValue, 'test/beta')
   assert.deepEqual(conn.updates, [
+    { sessionId: 's1', update: { sessionUpdate: 'current_mode_update', currentModeId: 'medium' } },
     {
       sessionId: 's1',
       update: {
@@ -158,6 +169,9 @@ test('PiAcpAgent: setSessionConfigOption maps thought level changes to pi and em
     sessionId: 's1',
     cwd: process.cwd(),
     proc: {
+      async getAvailableThinkingLevels() {
+        return ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+      },
       async getAvailableModels() {
         return {
           models: [{ provider: 'test', id: 'alpha', name: 'Alpha' }]
