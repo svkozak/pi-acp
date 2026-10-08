@@ -29,6 +29,13 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  disposeCount = 0
+
+  dispose(): void {
+    this.disposeCount++
+    this.emit({ type: 'process_exit', error: 'pi process exited (code=null, signal=SIGTERM)' })
+  }
+
   getSessionStatsCount = 0
 
   sessionStats: PiSessionStats = {}
@@ -72,6 +79,10 @@ export class FakePiRpcProcess {
 
   async getMessages(): Promise<any> {
     return { messages: [] }
+  }
+
+  async getCommands(): Promise<unknown> {
+    return { commands: [] }
   }
 
   async getSessionStats(): Promise<PiSessionStats> {

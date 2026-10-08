@@ -18,6 +18,7 @@ Expect some minor breaking changes.
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
   - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
   - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) on completion when possible
+- Concurrent sessions: creating or loading a session does not stop other sessions in the same client window. Reloading a live session reuses its Pi process. Processes are retained until the session is deleted or the client disconnects; there is no automatic idle eviction. If a process exits unexpectedly, outstanding prompts settle with a visible error and the session can be restored on the next request.
 - Session persistence
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
   - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file

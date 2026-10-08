@@ -18,13 +18,13 @@ function makeFakeChild(): FakeChild {
   child.stderr = new PassThrough()
   child.killed = false
   child.kill = () => {}
-  child.stdin = {
+  child.stdin = Object.assign(new EventEmitter(), {
     write: (line: string, cb?: (error?: Error | null) => void) => {
       written.push(String(line))
       cb?.(null)
       return true
     }
-  }
+  })
   return { child, stdout, written }
 }
 
