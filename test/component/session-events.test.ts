@@ -62,6 +62,42 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   })
 })
 
+test('PiAcpSession: suppresses agent_thought_chunk when PI_ACP_HIDE_THINKING=true', async () => {
+  process.env.PI_ACP_HIDE_THINKING = 'true'
+  try {
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+
+    new PiAcpSession({
+      sessionId: 's1',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
+
+    proc.emit({
+      type: 'message_update',
+      assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking...' }
+    })
+    proc.emit({
+      type: 'message_update',
+      assistantMessageEvent: { type: 'text_delta', delta: 'hi' }
+    })
+
+    await new Promise(r => setTimeout(r, 0))
+
+    assert.equal(conn.updates.length, 1)
+    assert.deepEqual(conn.updates[0]!.update, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'hi' }
+    })
+  } finally {
+    delete process.env.PI_ACP_HIDE_THINKING
+  }
+})
+
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

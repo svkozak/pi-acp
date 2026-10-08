@@ -295,6 +295,9 @@ export class PiAcpSession {
   private readonly conn: AgentSideConnection
   private readonly fileCommands: FileSlashCommand[]
 
+  // When true, pi thinking blocks are not forwarded to the client.
+  private readonly hideThinking: boolean
+
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   private cancelRequested = false
@@ -339,6 +342,7 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.hideThinking = process.env.PI_ACP_HIDE_THINKING === 'true'
     this.initialTitlePending = opts.autoTitle ?? false
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
@@ -657,11 +661,12 @@ export class PiAcpSession {
           break
         }
 
-        if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string') {
+        if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string' && !this.hideThinking) {
           this.emit({
             sessionUpdate: 'agent_thought_chunk',
             content: { type: 'text', text: ame.delta } satisfies ContentBlock
           })
+
           break
         }
 
