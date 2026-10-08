@@ -207,3 +207,15 @@ Project layout:
 ## License
 
 MIT (see [LICENSE](LICENSE)).
+
+## Programmatic projection API
+
+`pi-acp/library` exports `PiAcpSession`, `getSessionConfiguration`, and
+`PROJECTION_API_VERSION` (currently `1`) without running the CLI or spawning pi.
+An SDK host can reuse the same tool/diff projection and configuration options.
+
+`PiAcpSession.emit(update)`, `flushEmits()`, `handlePiEvent(event)`, and
+`hasToolCall(id)` are public projection operations. The constructor subscribes to
+the supplied event source; it does not create a subprocess.
+`getSessionConfiguration(source)` accepts a `PiConfigurationSource` implementing
+`getState`, `getAvailableModels`, and `getAvailableThinkingLevels`.

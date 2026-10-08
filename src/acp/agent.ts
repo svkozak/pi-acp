@@ -1195,8 +1195,10 @@ export class PiAcpAgent implements ACPAgent {
   }
 }
 
+export type PiConfigurationSource = Pick<PiRpcProcess, 'getState' | 'getAvailableModels' | 'getAvailableThinkingLevels'>
+
 async function getThinkingState(
-  proc: PiRpcProcess,
+  proc: PiConfigurationSource,
   pre?: { state?: any | null }
 ): Promise<{
   availableModes: Array<{
@@ -1224,8 +1226,8 @@ async function getThinkingState(
   }
 }
 
-async function getSessionConfiguration(
-  proc: PiRpcProcess,
+export async function getSessionConfiguration(
+  proc: PiConfigurationSource,
   pre?: { state?: any | null; availableModels?: any | null }
 ): Promise<{
   configOptions: SessionConfigOption[]
@@ -1302,7 +1304,7 @@ function buildConfigOptions(state: {
 }
 
 async function getModelState(
-  proc: PiRpcProcess,
+  proc: PiConfigurationSource,
   pre?: { state?: any | null; availableModels?: any | null }
 ): Promise<{
   availableModels: AdvertisedModel[]

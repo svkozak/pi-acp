@@ -474,7 +474,7 @@ export class PiAcpSession {
     }
   }
 
-  private emit(update: SessionUpdate): void {
+  emit(update: SessionUpdate): void {
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
       .then(() =>
@@ -489,7 +489,7 @@ export class PiAcpSession {
       })
   }
 
-  private async flushEmits(): Promise<void> {
+  async flushEmits(): Promise<void> {
     await this.lastEmit
   }
 
@@ -635,7 +635,11 @@ export class PiAcpSession {
     })
   }
 
-  private handlePiEvent(ev: PiRpcEvent) {
+  hasToolCall(toolCallId: string): boolean {
+    return this.currentToolCalls.has(toolCallId)
+  }
+
+  handlePiEvent(ev: PiRpcEvent) {
     const type = String((ev as any).type ?? '')
 
     switch (type) {
