@@ -118,6 +118,7 @@ Point your ACP client to the built `dist/index.js`:
 - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
+- `PI_ACP_DATA_DIR` overrides the default location for pi-acp's own data directory (default: `~/.pi/pi-acp`). This controls where the session-map file and any future adapter-owned data is stored. Separate from `PI_CODING_AGENT_DIR`, which rehomes pi's own agent directory.
 
 You can add the environment variable in the Zed settings with:
 
