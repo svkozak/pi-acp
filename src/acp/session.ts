@@ -162,9 +162,20 @@ function getEditOldTexts(args: unknown): string[] {
   return oldTexts
 }
 
-function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
+function toToolCallLocations(
+  toolName: string,
+  args: unknown,
+  cwd: string,
+  line?: number
+): ToolCallLocation[] | undefined {
   const path = getToolPath(args)
   if (!path) return undefined
+
+  if (toolName === 'read') {
+    // SAFETY: getToolPath found a string path on args; offset remains unknown until validated below.
+    const offset = (args as { offset?: unknown }).offset
+    line = typeof offset === 'number' && Number.isSafeInteger(offset) && offset > 0 ? offset - 1 : undefined
+  }
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
@@ -691,7 +702,7 @@ export class PiAcpSession {
                     }
                   })()
 
-            const locations = toToolCallLocations(rawInput, this.cwd)
+            const locations = toToolCallLocations(toolName, rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
             const status = existingStatus ?? 'pending'
@@ -745,7 +756,7 @@ export class PiAcpSession {
         let line: number | undefined
 
         if (isBashTool(toolName)) {
-          const locations = toToolCallLocations(args, this.cwd)
+          const locations = toToolCallLocations(toolName, args, this.cwd)
           const existingStatus = this.currentToolCalls.get(toolCallId)
           this.currentToolCalls.set(toolCallId, 'in_progress')
           this.emitBashToolCall({
@@ -785,7 +796,7 @@ export class PiAcpSession {
           }
         }
 
-        const locations = toToolCallLocations(args, this.cwd, line)
+        const locations = toToolCallLocations(toolName, args, this.cwd, line)
 
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
