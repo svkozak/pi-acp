@@ -1,3 +1,44 @@
+const SPECIALIZED_TOOL_TITLES = new Set(['bash', 'read', 'write', 'edit'])
+
+export function toolResultTitle(toolName: string, result: unknown): string {
+  if (SPECIALIZED_TOOL_TITLES.has(toolName.toLowerCase())) return toolName
+
+  const rawText = plainTextResult(result)
+  if (!rawText || /[\r\n]/.test(rawText)) return toolName
+
+  const text = rawText.trim()
+  if (!text || isStructuredJson(text)) return toolName
+
+  return `${toolName}: ${text}`
+}
+
+function plainTextResult(result: unknown): string | undefined {
+  if (typeof result === 'string') return result
+
+  const content = (result as { content?: unknown } | null)?.content
+  if (!Array.isArray(content) || !content.length) return undefined
+
+  const texts: string[] = []
+  for (const value of content) {
+    const block = value as { type?: unknown; text?: unknown } | null
+    if (block?.type !== 'text' || typeof block.text !== 'string' || isStructuredJson(block.text.trim())) {
+      return undefined
+    }
+    texts.push(block.text)
+  }
+
+  return texts.join('')
+}
+
+function isStructuredJson(text: string): boolean {
+  try {
+    const parsed = JSON.parse(text)
+    return typeof parsed === 'object' && parsed !== null
+  } catch {
+    return false
+  }
+}
+
 export function toolResultToText(result: unknown): string {
   if (!result) return ''
 
