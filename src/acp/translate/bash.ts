@@ -80,6 +80,27 @@ export function bashOutputDelta(previous: string, next: string): string {
   return next.startsWith(previous) ? next.slice(previous.length) : next
 }
 
+export function bashMaxOutputLines(): number | undefined {
+  const value = process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+  if (value == null || value === '') return undefined
+  const parsed = Number(value)
+  return Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed
+}
+
+export function truncateToLastLines(text: string, maxLines?: number): string {
+  if (maxLines == null || maxLines <= 0) return text
+
+  const hasTrailingNewline = text.endsWith('\n')
+  const trimmed = hasTrailingNewline ? text.slice(0, -1) : text
+  const lines = trimmed.split('\n')
+
+  if (lines.length <= maxLines) return text
+
+  const skipped = lines.length - maxLines
+  const tail = lines.slice(-maxLines).join('\n')
+  return `... (${skipped} earlier lines truncated)\n${tail}${hasTrailingNewline ? '\n' : ''}`
+}
+
 export function bashTerminalContent(toolCallId: string): ToolCallContent[] {
   return [{ type: 'terminal', terminalId: toolCallId }] satisfies ToolCallContent[]
 }
