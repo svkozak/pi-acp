@@ -20,6 +20,7 @@ import {
 } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
+import { handoffSpawnArgs } from './mcp-handoff.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
@@ -210,11 +211,16 @@ export class SessionManager {
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
+    // Mount the session/new MCP array through the bundled bridge extension.
+    // Fail-closed before spawning: an unservable element refuses the session
+    // instead of running one whose tools silently never arrive.
+    const handoffExtras = handoffSpawnArgs(params.mcpServers)
     let proc: PiRpcProcess
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
-        piCommand: params.piCommand
+        piCommand: params.piCommand,
+        ...handoffExtras
       })
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {
