@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
+import { getAgentDir } from './pi-settings.js'
 
 /**
  * File-based slash command (mirrors pi-coding-agent semantics).
@@ -92,13 +92,13 @@ function loadCommandsFromDir(dir: string, source: 'user' | 'project', subdir = '
 
 /**
  * Load prompt templates from pi's prompt directories (formerly "commands").
- *  - user:    ~/.pi/agent/prompts/**\/*.md
+ *  - user:    <agentDir>/prompts/**\/*.md (defaults to ~/.pi/agent)
  *  - project: <cwd>/.pi/prompts/**\/*.md
  */
 export function loadSlashCommands(cwd: string): FileSlashCommand[] {
   const commands: FileSlashCommand[] = []
 
-  const userDir = join(homedir(), '.pi', 'agent', 'prompts')
+  const userDir = join(getAgentDir(), 'prompts')
   const projectDir = resolve(cwd, '.pi', 'prompts')
 
   // Match pi ordering: user first, then project.
