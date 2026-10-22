@@ -1582,7 +1582,7 @@ function buildStartupInfo(opts: {
 
   // Prompts
   const promptsItems: string[] = []
-  const promptsDir = join(process.env.HOME ?? '', '.pi', 'agent', 'prompts')
+  const promptsDir = join(getAgentDir(), 'prompts')
   try {
     const prompts = readdirSync(promptsDir).filter(f => f.endsWith('.md'))
     for (const f of prompts) promptsItems.push(`/${basename(f, '.md')}`)
@@ -1593,7 +1593,7 @@ function buildStartupInfo(opts: {
 
   // Extensions
   const extItems: string[] = []
-  const extDir = join(process.env.HOME ?? '', '.pi', 'agent', 'extensions')
+  const extDir = join(getAgentDir(), 'extensions')
   try {
     const exts = readdirSync(extDir).filter(f => f.endsWith('.ts') || f.endsWith('.js'))
     for (const f of exts) extItems.push(join(extDir, f))

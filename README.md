@@ -142,8 +142,10 @@ You can add the environment variable in the Zed settings with:
 
 Loaded from:
 
-- User commands: `~/.pi/agent/prompts/**/*.md`
+- User commands: `$PI_CODING_AGENT_DIR/prompts/**/*.md` (default: `~/.pi/agent/prompts/**/*.md`)
 - Project commands: `<cwd>/.pi/prompts/**/*.md`
+
+`PI_CODING_AGENT_DIR` also selects the user prompts and extensions listed in startup info.
 
 #### 2) Built-in commands
 
