@@ -1301,6 +1301,17 @@ function buildConfigOptions(state: {
   return configOptions
 }
 
+// Clients may reject a model whose display name is blank or equal to its id
+// (JetBrains IDEs drop the whole selector in that case), so always derive a distinct one.
+function advertisedModel(provider: string, id: string, rawName: unknown): AdvertisedModel {
+  const name = String(rawName ?? '').trim() || id
+  return {
+    modelId: `${provider}/${id}`,
+    name: name === id ? `${id} (${provider})` : `${provider}/${name}`,
+    description: null
+  }
+}
+
 async function getModelState(
   proc: PiRpcProcess,
   pre?: { state?: any | null; availableModels?: any | null }
@@ -1327,13 +1338,7 @@ async function getModelState(
       const provider = String(m?.provider ?? '').trim()
       const id = String(m?.id ?? '').trim()
       if (!provider || !id) return null
-
-      const name = String(m?.name ?? id)
-      return {
-        modelId: `${provider}/${id}`,
-        name: `${provider}/${name}`,
-        description: null
-      } satisfies AdvertisedModel
+      return advertisedModel(provider, id, m?.name)
     })
     .filter(Boolean) as AdvertisedModel[]
 
@@ -1354,7 +1359,12 @@ async function getModelState(
   if (model && typeof model === 'object') {
     const provider = String((model as any).provider ?? '').trim()
     const id = String((model as any).id ?? '').trim()
-    if (provider && id) currentModelId = `${provider}/${id}`
+    if (provider && id) {
+      currentModelId = `${provider}/${id}`
+      if (!availableModels.some(m => m.modelId === currentModelId)) {
+        availableModels.push(advertisedModel(provider, id, (model as any).name))
+      }
+    }
   }
 
   if (!availableModels.length && !currentModelId) return null
