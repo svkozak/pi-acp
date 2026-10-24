@@ -58,6 +58,35 @@ test('PiAcpSession: context usage request specifies the auxiliary timeout', asyn
   ])
 })
 
+test('PiAcpSession: usage_update carries the session cost in USD', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = { cost: 0.0906, contextUsage: { tokens: 100, contextWindow: 100_000 } }
+
+  await makeSession(proc, conn).publishContextUsage()
+
+  assert.deepEqual(conn.updates, [
+    {
+      sessionId: 's1',
+      update: { sessionUpdate: 'usage_update', used: 100, size: 100_000, cost: { amount: 0.0906, currency: 'USD' } }
+    }
+  ])
+})
+
+test('PiAcpSession: usage_update omits a missing or unusable cost', async () => {
+  for (const cost of [undefined, Number.NaN, -1]) {
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+    proc.sessionStats = { cost, contextUsage: { tokens: 100, contextWindow: 100_000 } }
+
+    await makeSession(proc, conn).publishContextUsage()
+
+    assert.deepEqual(conn.updates, [
+      { sessionId: 's1', update: { sessionUpdate: 'usage_update', used: 100, size: 100_000 } }
+    ])
+  }
+})
+
 test('PiAcpAgent: newSession publishes context usage only after the response is returned', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
