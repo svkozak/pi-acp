@@ -919,7 +919,7 @@ export class PiAcpSession {
       case 'auto_retry_end': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Retry finished, resuming.' } satisfies ContentBlock
+          content: { type: 'text', text: formatAutoRetryEndMessage(ev) } satisfies ContentBlock
         })
         break
       }
@@ -1111,18 +1111,31 @@ function optionIndex(optionId: string): number | null {
 }
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {
-  const attempt = Number((ev as any).attempt)
-  const maxAttempts = Number((ev as any).maxAttempts)
-  const delayMs = Number((ev as any).delayMs)
+  const attempt = Number(ev.attempt)
+  const maxAttempts = Number(ev.maxAttempts)
+  const delayMs = Number(ev.delayMs)
 
   if (!Number.isFinite(attempt) || !Number.isFinite(maxAttempts) || !Number.isFinite(delayMs)) {
-    return 'Retrying...'
+    return formatRetryStatus('Retrying...', ev.errorMessage)
   }
 
   let delaySeconds = Math.round(delayMs / 1000)
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1
 
-  return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
+  return formatRetryStatus(`Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`, ev.errorMessage)
+}
+
+function formatAutoRetryEndMessage(ev: PiRpcEvent): string {
+  if (ev.success === true) {
+    return formatRetryStatus('Retry finished, resuming.')
+  }
+
+  return formatRetryStatus(ev.success === false ? 'Retry failed.' : 'Retry finished.', ev.finalError)
+}
+
+function formatRetryStatus(status: string, error?: unknown): string {
+  const detail = typeof error === 'string' ? error.trim() : ''
+  return `\n\n${status}${detail ? `\nError: ${detail}` : ''}\n\n`
 }
 
 function toToolKind(toolName: string): ToolKind {
