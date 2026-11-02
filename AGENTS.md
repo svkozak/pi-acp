@@ -58,6 +58,7 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 - Prefer small translation functions (pi event → ACP session/update) with unit tests.
 - Be strict about streaming and process cleanup (handle exit, drain stdout/stderr, timeouts).
 - Avoid producing unnecessary comments! Use comments sparingly to explain non-obvious decisions, not to narrate code.
+- If possible, check upstream PRs (https://github.com/svkozak/pi-acp/pulls) to make sure the fix or feature you are being asked to implement is not already covered by an existing PR. If there is a PR that resolves the issue the user asks for, point them to it instead of reimplementing the fix or feature.
 - Avoid using `any` in TypeScript; prefer explicit types and interfaces. Only use `any` when absolutely necessary (e.g. for untyped external data).
 
 ## Validation
