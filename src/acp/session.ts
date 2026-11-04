@@ -974,14 +974,12 @@ export class PiAcpSession {
 
       case 'compaction_start':
       case 'auto_compaction_start': {
+        if (ev.reason === 'manual') break
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text:
-              ev.reason === 'manual'
-                ? 'Compacting context...'
-                : 'Context nearing limit, running automatic compaction...'
+            text: 'Context nearing limit, running automatic compaction...'
           } satisfies ContentBlock
         })
         break
@@ -989,6 +987,7 @@ export class PiAcpSession {
 
       case 'compaction_end':
       case 'auto_compaction_end': {
+        if (ev.reason === 'manual') break
         if (ev.aborted === true) {
           if (this.pendingTurn) this.pendingTurn.error = toPromptError('Compaction was cancelled.')
           break
@@ -1002,10 +1001,7 @@ export class PiAcpSession {
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text:
-              ev.reason === 'manual'
-                ? 'Compaction finished; context was summarized.'
-                : 'Automatic compaction finished; context was summarized to continue the session.'
+            text: 'Automatic compaction finished; context was summarized to continue the session.'
           } satisfies ContentBlock
         })
         break
@@ -1176,18 +1172,20 @@ function optionIndex(optionId: string): number | null {
 }
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {
-  const attempt = Number((ev as any).attempt)
-  const maxAttempts = Number((ev as any).maxAttempts)
-  const delayMs = Number((ev as any).delayMs)
+  const attempt = Number(ev.attempt)
+  const maxAttempts = Number(ev.maxAttempts)
+  const delayMs = Number(ev.delayMs)
+  const reason = stringProp(ev, 'errorMessage')?.trim()
+  const suffix = reason ? ` ${reason}` : ''
 
   if (!Number.isFinite(attempt) || !Number.isFinite(maxAttempts) || !Number.isFinite(delayMs)) {
-    return 'Retrying...'
+    return `Retrying...${suffix}`
   }
 
   let delaySeconds = Math.round(delayMs / 1000)
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1
 
-  return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
+  return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...${suffix}`
 }
 
 function toToolKind(toolName: string): ToolKind {

@@ -194,11 +194,15 @@ test('retry exhaustion omits missing or invalid attempt counts', async () => {
   }
 })
 
-for (const eventType of ['compaction_end', 'auto_compaction_end']) {
-  test(`${eventType} failure is visible and never reported as successful`, async () => {
+for (const [eventType, reason] of [
+  ['compaction_end', 'threshold'],
+  ['compaction_end', 'overflow'],
+  ['auto_compaction_end', undefined]
+]) {
+  test(`${eventType} ${reason ?? 'legacy'} failure is visible and never reported as successful`, async () => {
     const { session, proc, conn } = setup()
     const failed = assert.rejects(session.prompt('one'), /Summary failed/)
-    proc.emit({ type: eventType, result: null, aborted: false, errorMessage: 'Summary failed' })
+    proc.emit({ type: eventType, reason, result: null, aborted: false, errorMessage: 'Summary failed' })
     proc.emit({ type: 'agent_settled' })
     await failed
     assert.deepEqual(texts(conn), [])
@@ -235,7 +239,7 @@ test('cancelled compaction does not claim success or override explicit prompt ca
   assert.deepEqual(texts(conn), [])
 })
 
-test('manual compaction progress is described as manual, and a failed tool does not fail the prompt', async () => {
+test('manual compaction emits no duplicate progress, and a failed tool does not fail the prompt', async () => {
   const { session, proc, conn } = setup()
   const prompt = session.prompt('one')
   proc.emit({ type: 'compaction_start', reason: 'manual' })
@@ -244,7 +248,36 @@ test('manual compaction progress is described as manual, and a failed tool does 
   assistant(proc, 'stop')
   proc.emit({ type: 'agent_settled' })
   assert.equal(await prompt, 'end_turn')
-  assert.deepEqual(texts(conn), ['Compacting context...', 'Compaction finished; context was summarized.'])
+  assert.deepEqual(texts(conn), [])
+})
+
+for (const aborted of [false, true]) {
+  test(`manual compaction ${aborted ? 'cancellation' : 'failure'} preserves successful and queued prompts`, async () => {
+    const { session, proc, conn } = setup()
+    const first = session.prompt('one').catch(error => error)
+    const second = session.prompt('two').catch(error => error)
+    assistant(proc, 'stop')
+    proc.emit({ type: 'compaction_start', reason: 'manual' })
+    proc.emit({ type: 'compaction_end', reason: 'manual', result: null, aborted, errorMessage: 'Summary failed' })
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await first, 'end_turn')
+    assert.deepEqual(
+      proc.prompts.map(prompt => prompt.message),
+      ['one', 'two']
+    )
+    assistant(proc, 'stop')
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await second, 'end_turn')
+    assert.deepEqual(texts(conn), ['Queued message (position 1).', 'Starting queued message. (0 remaining)'])
+  })
+}
+
+test('manual compaction emits no event messages while idle', async () => {
+  const { proc, conn } = setup()
+  proc.emit({ type: 'compaction_start', reason: 'manual' })
+  proc.emit({ type: 'compaction_end', reason: 'manual', result: { summary: 'Summary' } })
+  await tick()
+  assert.deepEqual(texts(conn), [])
 })
 
 test('final failure rejects the queue and a later explicit prompt can succeed', async () => {
