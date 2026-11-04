@@ -110,13 +110,15 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private terminalError: Error | null = null
+  private exitHandlers: Array<(error: Error) => void> = []
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
 
     const rl = readline.createInterface({ input: child.stdout })
     rl.on('line', line => {
-      if (!line.trim()) return
+      if (this.terminalError || !line.trim()) return
       let msg: any
       try {
         msg = JSON.parse(line)
@@ -140,15 +142,10 @@ export class PiRpcProcess {
     })
 
     child.on('exit', (code, signal) => {
-      const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
+      this.finish(new Error(`pi process exited (code=${code}, signal=${signal})`))
     })
-
-    child.on('error', err => {
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
-    })
+    child.on('error', err => this.finish(err))
+    child.stdin.on('error', err => this.finish(err))
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
@@ -238,7 +235,26 @@ export class PiRpcProcess {
     }
   }
 
+  onExit(handler: (error: Error) => void): () => void {
+    if (this.terminalError) handler(this.terminalError)
+    else this.exitHandlers.push(handler)
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
+    }
+  }
+
+  private finish(error: Error): void {
+    if (this.terminalError) return
+    this.terminalError = error
+    for (const pending of this.pending.values()) pending.reject(error)
+    this.pending.clear()
+    for (const handler of this.exitHandlers) handler(error)
+    this.exitHandlers = []
+    this.eventHandlers = []
+  }
+
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
+    this.finish(new Error('pi process disposed'))
     if (this.child.killed) return
     try {
       this.child.kill(signal as any)
@@ -414,6 +430,7 @@ export class PiRpcProcess {
   }
 
   private writeLine(line: string): Promise<void> {
+    if (this.terminalError) return Promise.reject(this.terminalError)
     return new Promise<void>((resolve, reject) => {
       try {
         this.child.stdin.write(line, error => {

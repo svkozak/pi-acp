@@ -18,7 +18,7 @@ import {
   type PiRpcEvent,
   type PiSessionStats
 } from '../pi-rpc/process.js'
-import { maybeAuthRequiredError } from './auth-required.js'
+import { toPromptError } from './prompt-error.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
@@ -42,10 +42,12 @@ type SessionCreateParams = {
   piCommand?: string
 }
 
-export type StopReason = 'end_turn' | 'cancelled' | 'error'
+export type StopReason = 'end_turn' | 'max_tokens' | 'cancelled'
 
 type PendingTurn = {
   title?: string
+  error?: Error
+  completionReason: 'end_turn' | 'max_tokens'
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
 }
@@ -191,20 +193,8 @@ export class SessionManager {
   close(sessionId: string): void {
     const s = this.sessions.get(sessionId)
     if (!s) return
-    try {
-      s.proc.dispose?.()
-    } catch {
-      // ignore
-    }
+    s.dispose()
     this.sessions.delete(sessionId)
-  }
-
-  /** Close all sessions except the one with `keepSessionId`. */
-  closeAllExcept(keepSessionId: string): void {
-    for (const [id] of this.sessions) {
-      if (id === keepSessionId) continue
-      this.close(id)
-    }
   }
 
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
@@ -301,6 +291,10 @@ export class PiAcpSession {
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
+  private disposed = false
+  private terminalError: Error | null = null
+  private unsubscribeEvents: () => void = () => {}
+  private unsubscribeExit: () => void = () => {}
   private readonly turnQueue: QueuedTurn[] = []
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
@@ -341,7 +335,36 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
     this.initialTitlePending = opts.autoTitle ?? false
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.unsubscribeEvents = this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.unsubscribeExit = this.proc.onExit?.(error => this.fail(error)) ?? (() => {})
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.cancelRequested = true
+    this.unsubscribeEvents()
+    this.unsubscribeExit()
+    this.settleTurns()
+    this.proc.dispose?.()
+  }
+
+  private settleTurns(error?: Error): void {
+    const turns = [...(this.pendingTurn ? [this.pendingTurn] : []), ...this.turnQueue.splice(0)]
+    this.pendingTurn = null
+    this.inAgentLoop = false
+    this.emit({ sessionUpdate: 'session_info_update', _meta: { piAcp: { queueDepth: 0, running: false } } })
+    const delivered = this.flushEmits()
+    for (const turn of turns) {
+      if (error) void delivered.then(() => turn.reject(error))
+      else turn.resolve('cancelled')
+    }
+  }
+
+  private fail(error: Error): void {
+    if (this.disposed || this.terminalError) return
+    this.terminalError = toPromptError(error)
+    this.settleTurns(this.cancelRequested ? undefined : this.terminalError)
   }
 
   setStartupInfo(text: string) {
@@ -365,6 +388,8 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = [], title?: string): Promise<StopReason> {
+    if (this.terminalError) throw this.terminalError
+    if (this.disposed) throw RequestError.invalidParams(`Session is closed: ${this.sessionId}`)
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
@@ -424,10 +449,6 @@ export class PiAcpSession {
     await this.proc.abort()
   }
 
-  wasCancelRequested(): boolean {
-    return this.cancelRequested
-  }
-
   async setSessionName(name: string): Promise<void> {
     return this.enqueueTitleUpdate(async () => {
       await this.proc.setSessionName(name)
@@ -475,13 +496,16 @@ export class PiAcpSession {
   }
 
   private emit(update: SessionUpdate): void {
+    if (this.disposed) return
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
       .then(() =>
-        this.conn.sessionUpdate({
-          sessionId: this.sessionId,
-          update
-        })
+        this.disposed
+          ? undefined
+          : this.conn.sessionUpdate({
+              sessionId: this.sessionId,
+              update
+            })
       )
       .catch(() => {
         // Ignore notification errors (client may have gone away). We still want
@@ -513,12 +537,19 @@ export class PiAcpSession {
   }
 
   private async settleTurn(): Promise<void> {
-    // Ensure all updates derived from pi events (plus the final usage update) are
-    // delivered before we resolve the ACP `session/prompt` request.
-    await this.publishContextUsage()
+    const pendingTurn = this.pendingTurn
+    if (!pendingTurn) return
 
-    const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-    this.pendingTurn?.resolve(reason)
+    // Deliver pi events and context usage before settling the ACP request.
+    await this.publishContextUsage()
+    if (this.disposed || this.terminalError || this.pendingTurn !== pendingTurn) return
+    if (!this.cancelRequested && pendingTurn.error) {
+      this.settleTurns(pendingTurn.error)
+      return
+    }
+
+    const reason: StopReason = this.cancelRequested ? 'cancelled' : pendingTurn.completionReason
+    pendingTurn.resolve(reason)
     this.pendingTurn = null
     this.inAgentLoop = false
 
@@ -596,7 +627,7 @@ export class PiAcpSession {
     this.cancelRequested = false
     this.inAgentLoop = false
 
-    this.pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject }
+    this.pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject, completionReason: 'end_turn' }
     void this.maybeAutoTitle(t.title)
 
     // Publish queue depth (0 because we're starting the turn now).
@@ -608,37 +639,37 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
     // continuations may emit multiple `agent_end` events before `agent_settled`.
+    const pendingTurn = this.pendingTurn
     this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
-        }
-
-        this.pendingTurn = null
-        this.inAgentLoop = false
-
-        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
-        })
-      })
-      void err
+      if (this.disposed || this.terminalError || this.pendingTurn !== pendingTurn) return
+      const error = toPromptError(err)
+      this.settleTurns(this.cancelRequested ? undefined : error)
     })
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
+    if (this.disposed || this.terminalError) return
     const type = String((ev as any).type ?? '')
 
     switch (type) {
+      case 'message_end': {
+        const message = ev.message
+        if (
+          !this.pendingTurn ||
+          !message ||
+          typeof message !== 'object' ||
+          !('role' in message) ||
+          message.role !== 'assistant'
+        )
+          break
+        const reason = stringProp(message, 'stopReason')
+        this.pendingTurn.completionReason = reason === 'length' ? 'max_tokens' : 'end_turn'
+        if (reason === 'error') this.pendingTurn.error = toPromptError(stringProp(message, 'errorMessage'))
+        else if (reason === 'aborted') this.cancelRequested = true
+        else if (reason) this.pendingTurn.error = undefined
+        break
+      }
+
       case 'session_info_changed': {
         const name = (ev as { name?: unknown }).name
         if (typeof name === 'string' || name === undefined) this.publishTitle(name ?? null)
@@ -917,6 +948,23 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_end': {
+        if (ev.success === false) {
+          if (this.pendingTurn) {
+            const reason = stringProp(ev, 'finalError')?.trim()
+            const error = toPromptError(reason || this.pendingTurn.error)
+            const attempt = ev.attempt
+            this.pendingTurn.error =
+              typeof attempt === 'number' && Number.isSafeInteger(attempt) && attempt > 0
+                ? new RequestError(
+                    error.code,
+                    `${error.message} (after ${attempt} ${attempt === 1 ? 'retry' : 'retries'})`,
+                    error.data
+                  )
+                : error
+          }
+          break
+        }
+        if (ev.success !== true) break
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: 'Retry finished, resuming.' } satisfies ContentBlock
@@ -924,7 +972,9 @@ export class PiAcpSession {
         break
       }
 
+      case 'compaction_start':
       case 'auto_compaction_start': {
+        if (ev.reason === 'manual') break
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
@@ -935,7 +985,18 @@ export class PiAcpSession {
         break
       }
 
+      case 'compaction_end':
       case 'auto_compaction_end': {
+        if (ev.reason === 'manual') break
+        if (ev.aborted === true) {
+          if (this.pendingTurn) this.pendingTurn.error = toPromptError('Compaction was cancelled.')
+          break
+        }
+        if (typeof ev.errorMessage === 'string' || ev.result === null) {
+          if (this.pendingTurn) this.pendingTurn.error = toPromptError(ev.errorMessage)
+          break
+        }
+        if (!ev.result) break
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: {
@@ -1111,18 +1172,20 @@ function optionIndex(optionId: string): number | null {
 }
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {
-  const attempt = Number((ev as any).attempt)
-  const maxAttempts = Number((ev as any).maxAttempts)
-  const delayMs = Number((ev as any).delayMs)
+  const attempt = Number(ev.attempt)
+  const maxAttempts = Number(ev.maxAttempts)
+  const delayMs = Number(ev.delayMs)
+  const reason = stringProp(ev, 'errorMessage')?.trim()
+  const suffix = reason ? ` ${reason}` : ''
 
   if (!Number.isFinite(attempt) || !Number.isFinite(maxAttempts) || !Number.isFinite(delayMs)) {
-    return 'Retrying...'
+    return `Retrying...${suffix}`
   }
 
   let delaySeconds = Math.round(delayMs / 1000)
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1
 
-  return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
+  return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...${suffix}`
 }
 
 function toToolKind(toolName: string): ToolKind {
