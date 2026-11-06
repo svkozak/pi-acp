@@ -4,6 +4,7 @@ import {
   type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
+  type ContentBlock,
   type InitializeRequest,
   type InitializeResponse,
   type ListSessionsRequest,
@@ -253,6 +254,7 @@ export class PiAcpAgent implements ACPAgent {
       authMethods: getAuthMethods({
         supportsTerminalAuthMeta: (params as any)?.clientCapabilities?._meta?.['terminal-auth'] === true
       }),
+      _meta: { steering: { supported: true } },
       agentCapabilities: {
         loadSession: true,
         mcpCapabilities: { http: false, sse: false },
@@ -444,6 +446,41 @@ export class PiAcpAgent implements ACPAgent {
     // Terminal Auth is handled out-of-band by re-launching the binary with `--terminal-login`.
     // If the client calls `authenticate` anyway, we can no-op successfully.
     return
+  }
+
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (method === '_session/steering') {
+      return this.steering(params)
+    }
+    throw RequestError.methodNotFound(method)
+  }
+
+  private async steering(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const sessionId = params.sessionId
+    if (typeof sessionId !== 'string' || !Array.isArray(params.prompt)) {
+      throw RequestError.invalidParams('sessionId and prompt are required')
+    }
+
+    const session = await this.restoreSession(sessionId)
+    const { message, images } = promptToPiMessage(params.prompt as ContentBlock[])
+
+    if (session.isRunning) {
+      try {
+        await session.steer(message, images)
+        return { outcome: 'injected' }
+      } catch {
+        return { outcome: 'failed' }
+      }
+    }
+
+    const idleBehavior = (params._meta as any)?.steering?.idleBehavior
+    if (idleBehavior === 'promptRequired') {
+      return { outcome: 'promptRequired', reason: 'noRunningTurn' }
+    }
+
+    // Idle: start an ordinary turn. Its updates stream as usual, but no prompt response is owed.
+    session.prompt(message, images, promptToSessionTitle(params.prompt as ContentBlock[]) ?? undefined).catch(() => {})
+    return { outcome: 'startedNewTurn', detached: true }
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {

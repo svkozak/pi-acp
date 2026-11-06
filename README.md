@@ -157,6 +157,15 @@ Loaded from:
 - `/steering` - maps to `pi` Steering Mode, get/set
 - `/follow-up` - pats to `pi` Follow-up Mode, get/set
 
+## Mid-turn steering
+
+pi-acp implements the pre-standard `_session/steering` extension method (see
+[agent-client-protocol#1261](https://github.com/agentclientprotocol/agent-client-protocol/pull/1261))
+and advertises it as `_meta.steering.supported` on `initialize`. While a turn is running, the
+message is forwarded to pi's `steer` RPC command and delivered after the current tool calls finish
+(`outcome: "injected"`). When idle, it starts an ordinary turn (`startedNewTurn`), or returns
+`promptRequired` if the request sets `_meta.steering.idleBehavior: "promptRequired"`.
+
 Other built-in commands:
 
 - `/model` - not implemented (use the model selector UI in Zed)

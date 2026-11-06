@@ -28,6 +28,9 @@ export class FakePiRpcProcess {
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
+  readonly steers: Array<{ message: string; images: unknown[] }> = []
+  /** When set, `steer()` rejects with this error. */
+  steerError: unknown = null
   abortCount = 0
   getSessionStatsCount = 0
 
@@ -48,6 +51,11 @@ export class FakePiRpcProcess {
 
   async prompt(message: string, attachments: unknown[] = []): Promise<void> {
     this.prompts.push({ message, attachments })
+  }
+
+  async steer(message: string, images: unknown[] = []): Promise<void> {
+    if (this.steerError) throw this.steerError
+    this.steers.push({ message, images })
   }
 
   async abort(): Promise<void> {
