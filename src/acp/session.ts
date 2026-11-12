@@ -11,6 +11,7 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
+import { createSessionAgentDir, removeSessionAgentDir } from './session-mcp.js'
 import {
   PiRpcProcess,
   PiRpcSpawnError,
@@ -210,18 +211,22 @@ export class SessionManager {
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
+    const mcpAgentDir = createSessionAgentDir(params.mcpServers)
     let proc: PiRpcProcess
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
-        piCommand: params.piCommand
+        piCommand: params.piCommand,
+        ...(mcpAgentDir === undefined ? {} : { env: { ...process.env, PI_CODING_AGENT_DIR: mcpAgentDir } })
       })
     } catch (e) {
+      removeSessionAgentDir(mcpAgentDir)
       if (e instanceof PiRpcSpawnError) {
         throw RequestError.internalError({ code: e.code }, e.message)
       }
       throw e
     }
+    if (mcpAgentDir !== undefined) proc.onExit(() => removeSessionAgentDir(mcpAgentDir))
 
     let state: any = null
     try {

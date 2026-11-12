@@ -103,6 +103,8 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** Environment for the pi process; defaults to this process's environment. */
+  env?: NodeJS.ProcessEnv
 }
 
 export class PiRpcProcess {
@@ -167,7 +169,7 @@ export class PiRpcProcess {
     const child = start(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env
+      env: params.env ?? process.env
     }) as ChildProcessWithoutNullStreams
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
@@ -245,6 +247,18 @@ export class PiRpcProcess {
     } catch {
       // ignore
     }
+  }
+
+  /** Run `handler` once, after the pi process exited or failed to run. */
+  onExit(handler: () => void): void {
+    let ran = false
+    const run = () => {
+      if (ran) return
+      ran = true
+      handler()
+    }
+    this.child.once('exit', run)
+    this.child.once('error', run)
   }
 
   /**

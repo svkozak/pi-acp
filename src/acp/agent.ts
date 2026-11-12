@@ -25,6 +25,7 @@ import {
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
+import { createSessionAgentDir, removeSessionAgentDir } from './session-mcp.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
@@ -195,19 +196,23 @@ export class PiAcpAgent implements ACPAgent {
 
       const cwd = opts?.cwd ?? stored.cwd
 
+      const mcpAgentDir = createSessionAgentDir(opts?.mcpServers)
       let proc: PiRpcProcess
       try {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          ...(mcpAgentDir === undefined ? {} : { env: { ...process.env, PI_CODING_AGENT_DIR: mcpAgentDir } })
         })
       } catch (e: any) {
+        removeSessionAgentDir(mcpAgentDir)
         if (e?.name === 'PiRpcSpawnError') {
           throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
         }
         throw e
       }
+      if (mcpAgentDir !== undefined) proc.onExit(() => removeSessionAgentDir(mcpAgentDir))
 
       const fileCommands = loadSlashCommands(cwd)
       const session = this.sessions.getOrCreate(sessionId, {
@@ -255,7 +260,7 @@ export class PiAcpAgent implements ACPAgent {
       }),
       agentCapabilities: {
         loadSession: true,
-        mcpCapabilities: { http: false, sse: false },
+        mcpCapabilities: { http: true, sse: false },
         promptCapabilities: {
           image: true,
           audio: false,
@@ -281,7 +286,7 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
-    // Pi doesn't support mcpServers, but we accept and store.
+    // pi reads its servers from its agent directory, so the session gets one of its own.
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,
