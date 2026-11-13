@@ -13,6 +13,8 @@ import {
   type NewSessionRequest,
   type PromptRequest,
   type PromptResponse,
+  type ResumeSessionRequest,
+  type ResumeSessionResponse,
   type SessionConfigOption,
   type SessionInfo,
   type SetSessionConfigOptionRequest,
@@ -265,7 +267,9 @@ export class PiAcpAgent implements ACPAgent {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
           list: {},
-          delete: {}
+          delete: {},
+          // Reopens a session like `session/load`, but without replaying its history.
+          resume: {}
         }
       }
     }
@@ -930,6 +934,17 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    return this.reopenSession(params, { replayHistory: true })
+  }
+
+  async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+    return this.reopenSession(params, { replayHistory: false })
+  }
+
+  private async reopenSession(
+    params: LoadSessionRequest | ResumeSessionRequest,
+    opts: { replayHistory: boolean }
+  ): Promise<LoadSessionResponse> {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
@@ -973,8 +988,8 @@ export class PiAcpAgent implements ACPAgent {
       sessionFile: stored.sessionFile
     })
 
-    // Replay full conversation history.
-    const data = (await proc.getMessages()) as any
+    // `session/load` replays the full conversation history; `session/resume` must not.
+    const data = opts.replayHistory ? ((await proc.getMessages()) as any) : null
     const messages = Array.isArray(data?.messages) ? data.messages : []
 
     for (const m of messages) {
