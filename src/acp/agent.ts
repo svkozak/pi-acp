@@ -21,7 +21,9 @@ import {
   type SetSessionModeResponse,
   type StopReason,
   type DeleteSessionRequest,
-  type DeleteSessionResponse
+  type DeleteSessionResponse,
+  type ForkSessionRequest,
+  type ForkSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
@@ -124,6 +126,7 @@ export class PiAcpAgent implements ACPAgent {
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()
   private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
+  private readonly freshForks = new Set<string>()
 
   dispose(): void {
     this.sessions.disposeAll()
@@ -265,6 +268,7 @@ export class PiAcpAgent implements ACPAgent {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
           list: {},
+          fork: {},
           delete: {}
         }
       }
@@ -448,6 +452,7 @@ export class PiAcpAgent implements ACPAgent {
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const session = await this.restoreSession(params.sessionId)
+    this.freshForks.delete(params.sessionId)
 
     const { message, images } = promptToPiMessage(params.prompt)
 
@@ -937,7 +942,8 @@ export class PiAcpAgent implements ACPAgent {
     // If the client is re-loading a session that is already active, tear down the existing
     // pi subprocess so we can start fresh and re-advertise commands reliably.
     // (Some clients may call session/load when restoring from history.)
-    this.sessions.close(params.sessionId)
+    // A session that was just forked is already running on its new file; attach to it instead.
+    if (!this.freshForks.delete(params.sessionId)) this.sessions.close(params.sessionId)
 
     this.lastSessionCwd = params.cwd
 
@@ -1116,6 +1122,64 @@ export class PiAcpAgent implements ACPAgent {
     }, 0)
 
     return response
+  }
+
+  async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+    if (!isAbsolute(params.cwd)) {
+      throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
+    }
+    const source = this.findStoredSession(params.sessionId)
+    if (!source) throw RequestError.invalidParams(`Unknown sessionId: ${params.sessionId}`)
+    if (realpathSync(source.cwd) !== realpathSync(params.cwd)) {
+      throw RequestError.invalidParams('A session can only be forked within its own project directory')
+    }
+
+    // pi copies the file itself before it loads extensions, so the source session is
+    // never opened by a second process. The new process then serves the fork.
+    const before = readFileSync(source.sessionFile)
+    const forkId = crypto.randomUUID()
+    let proc: PiRpcProcess | null = null
+    let forkFile: string | null = null
+    try {
+      proc = await PiRpcProcess.spawn({
+        cwd: source.cwd,
+        fork: { sessionPath: source.sessionFile, sessionId: forkId },
+        piCommand: process.env.PI_ACP_PI_COMMAND
+      })
+      const state = (await proc.getState()) as any
+      forkFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
+      if (state?.sessionId !== forkId || !forkFile || forkFile === source.sessionFile) {
+        throw new Error('pi did not create the forked session')
+      }
+      const configuration = await getSessionConfiguration(proc, { state })
+      if (!readFileSync(source.sessionFile).equals(before)) {
+        throw new Error('The session changed while it was being forked; try again once it is idle')
+      }
+
+      this.store.upsert({ sessionId: forkId, cwd: source.cwd, sessionFile: forkFile })
+      this.sessions.getOrCreate(forkId, {
+        cwd: source.cwd,
+        mcpServers: params.mcpServers ?? [],
+        conn: this.conn,
+        proc,
+        fileCommands: loadSlashCommands(source.cwd)
+      })
+      this.freshForks.add(forkId)
+      return { sessionId: forkId, ...configuration }
+    } catch (e: any) {
+      proc?.dispose()
+      if (forkFile && forkFile !== source.sessionFile) {
+        try {
+          unlinkSync(forkFile)
+        } catch {
+          // the fork may not have been written yet
+        }
+      }
+      this.store.delete(forkId)
+      if (e instanceof RequestError) throw e
+      if (e?.name === 'PiRpcSpawnError') throw RequestError.internalError({ code: e?.code }, String(e?.message))
+      throw RequestError.internalError({}, String(e?.message ?? e))
+    }
   }
 
   async deleteSession(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
