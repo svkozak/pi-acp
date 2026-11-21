@@ -53,6 +53,34 @@ test('PiAcpSession: names a new session when its first prompt starts', async () 
   assert.deepEqual(assignedNames, ['Fix thread titles'])
 })
 
+for (const stopReason of ['stop', 'length']) {
+  test(`PiAcpSession: ${stopReason} completion does not wait for the initial title`, async () => {
+    const conn = new FakeAgentSideConnection()
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const proc = Object.assign(new FakePiRpcProcess(), {
+      async setSessionName() {
+        await blocked
+      }
+    })
+    const session = createSession(conn, proc)
+    let completed = false
+    const prompt = session.prompt('hello', [], 'Initial title').finally(() => {
+      completed = true
+    })
+    proc.emit({ type: 'message_end', message: { role: 'assistant', stopReason } })
+    proc.emit({ type: 'agent_settled' })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(completed, true)
+    assert.equal(await prompt, stopReason === 'length' ? 'max_tokens' : 'end_turn')
+    release()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.ok(conn.updates.some(({ update }) => 'title' in update && update.title === 'Initial title'))
+  })
+}
+
 test('PiAcpSession: preserves an existing session name', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess() as any
