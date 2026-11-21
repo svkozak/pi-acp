@@ -48,6 +48,7 @@ type PendingTurn = {
   title?: string
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
+  settled?: boolean
 }
 
 type QueuedTurn = {
@@ -184,27 +185,16 @@ export class SessionManager {
     return this.sessions.get(sessionId)
   }
 
-  /**
-   * Dispose a session's underlying pi process and remove it from the manager.
-   * Used when clients explicitly reload a session and we want a fresh pi subprocess.
-   */
+  /** Dispose a session and its underlying pi process. */
   close(sessionId: string): void {
     const s = this.sessions.get(sessionId)
     if (!s) return
     try {
-      s.proc.dispose?.()
+      s.dispose()
     } catch {
       // ignore
     }
     this.sessions.delete(sessionId)
-  }
-
-  /** Close all sessions except the one with `keepSessionId`. */
-  closeAllExcept(keepSessionId: string): void {
-    for (const [id] of this.sessions) {
-      if (id === keepSessionId) continue
-      this.close(id)
-    }
   }
 
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
@@ -298,6 +288,13 @@ export class PiAcpSession {
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   private cancelRequested = false
+  private closed = false
+  private disposed = false
+  private unsubscribeEvents: (() => void) | undefined
+
+  get isClosed(): boolean {
+    return this.closed
+  }
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
@@ -341,7 +338,7 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
     this.initialTitlePending = opts.autoTitle ?? false
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.unsubscribeEvents = this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
 
   setStartupInfo(text: string) {
@@ -365,6 +362,7 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = [], title?: string): Promise<StopReason> {
+    if (this.closed) throw new Error('Pi session is closed; reload it before sending another prompt.')
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
@@ -403,6 +401,7 @@ export class PiAcpSession {
   }
 
   async cancel(): Promise<void> {
+    if (this.closed) return
     // Cancel current and clear any queued prompts.
     this.cancelRequested = true
 
@@ -426,6 +425,48 @@ export class PiAcpSession {
 
   wasCancelRequested(): boolean {
     return this.cancelRequested
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    if (!this.closed) this.cancelRequested = true
+    this.finishClosed('cancelled')
+    this.unsubscribeEvents?.()
+    this.proc.dispose()
+  }
+
+  private finishClosed(reason: StopReason, error?: string): void {
+    if (this.closed) return
+    this.closed = true
+    const pending = this.pendingTurn
+    const queued = this.turnQueue.splice(0)
+    this.pendingTurn = null
+    this.inAgentLoop = false
+
+    for (const toolCallId of this.currentToolCalls.keys()) {
+      this.emit({ sessionUpdate: 'tool_call_update', toolCallId, status: 'failed' })
+      this.cleanupToolCall(toolCallId)
+    }
+    if (((pending && !pending.settled) || queued.length > 0) && error && reason !== 'cancelled') {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: `Pi process exited before completing the turn: ${error}\nReload the session to continue.`
+        }
+      })
+    }
+    if (pending || queued.length > 0) {
+      this.emit({
+        sessionUpdate: 'session_info_update',
+        _meta: { piAcp: { queueDepth: 0, running: false } }
+      })
+    }
+    void this.flushEmits().finally(() => {
+      pending?.resolve(pending.settled && reason === 'error' ? 'end_turn' : reason)
+      for (const turn of queued) turn.resolve(reason)
+    })
   }
 
   async setSessionName(name: string): Promise<void> {
@@ -513,9 +554,13 @@ export class PiAcpSession {
   }
 
   private async settleTurn(): Promise<void> {
+    const pendingTurn = this.pendingTurn
+    if (!pendingTurn || pendingTurn.settled) return
+    pendingTurn.settled = true
     // Ensure all updates derived from pi events (plus the final usage update) are
     // delivered before we resolve the ACP `session/prompt` request.
     await this.publishContextUsage()
+    if (this.pendingTurn !== pendingTurn) return
 
     const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
     this.pendingTurn?.resolve(reason)
@@ -596,7 +641,8 @@ export class PiAcpSession {
     this.cancelRequested = false
     this.inAgentLoop = false
 
-    this.pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject }
+    const pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject }
+    this.pendingTurn = pendingTurn
     void this.maybeAutoTitle(t.title)
 
     // Publish queue depth (0 because we're starting the turn now).
@@ -612,6 +658,7 @@ export class PiAcpSession {
       // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
       void this.flushEmits().finally(() => {
+        if (this.pendingTurn !== pendingTurn) return
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
         const authErr = maybeAuthRequiredError(err)
         if (authErr) {
@@ -636,9 +683,14 @@ export class PiAcpSession {
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
+    if (this.closed) return
     const type = String((ev as any).type ?? '')
 
     switch (type) {
+      case 'process_exit': {
+        this.finishClosed(this.cancelRequested ? 'cancelled' : 'error', stringProp(ev, 'error') ?? undefined)
+        break
+      }
       case 'session_info_changed': {
         const name = (ev as { name?: unknown }).name
         if (typeof name === 'string' || name === undefined) this.publishTitle(name ?? null)
