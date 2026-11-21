@@ -70,6 +70,8 @@ type PiExtensionUiResponse =
 
 export type PiRpcEvent = Record<string, unknown>
 
+export type PiPromptDisposition = 'started' | 'queued' | 'handled'
+
 /** Maximum wait for an auxiliary context-usage update. */
 export const SESSION_STATS_TIMEOUT_MS = 1_000
 
@@ -256,9 +258,12 @@ export class PiRpcProcess {
     return lines
   }
 
-  async prompt(message: string, images: unknown[] = []): Promise<void> {
+  async prompt(message: string, images: unknown[] = []): Promise<PiPromptDisposition | undefined> {
     const res = await this.request({ type: 'prompt', message, images })
     if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
+    const disposition =
+      res.data && typeof res.data === 'object' && 'disposition' in res.data ? res.data.disposition : undefined
+    return disposition === 'started' || disposition === 'queued' || disposition === 'handled' ? disposition : undefined
   }
 
   async abort(): Promise<void> {

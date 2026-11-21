@@ -45,6 +45,7 @@ type SessionCreateParams = {
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
 
 type PendingTurn = {
+  modelStarted: boolean
   title?: string
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
@@ -307,11 +308,6 @@ export class PiAcpSession {
   // and clients may hide progress if we ever downgrade back to `pending`.
   private currentToolCalls = new Map<string, 'pending' | 'in_progress'>()
 
-  // pi can emit multiple `turn_end` and `agent_end` events for a single user prompt
-  // when retry, compaction, or queued continuations run. The session-level prompt
-  // completes only when `agent_settled` is emitted.
-  private inAgentLoop = false
-
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -512,15 +508,16 @@ export class PiAcpSession {
     await this.flushEmits()
   }
 
-  private async settleTurn(): Promise<void> {
+  private async settleTurn(turn = this.pendingTurn, handled = false): Promise<void> {
+    if (!turn || this.pendingTurn !== turn || (handled && turn.modelStarted)) return
     // Ensure all updates derived from pi events (plus the final usage update) are
     // delivered before we resolve the ACP `session/prompt` request.
     await this.publishContextUsage()
+    if (this.pendingTurn !== turn || (handled && turn.modelStarted)) return
 
     const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-    this.pendingTurn?.resolve(reason)
+    turn.resolve(reason)
     this.pendingTurn = null
-    this.inAgentLoop = false
 
     // Start next queued prompt, if any.
     const next = this.turnQueue.shift()
@@ -594,9 +591,9 @@ export class PiAcpSession {
 
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
-    this.inAgentLoop = false
 
-    this.pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject }
+    const turn: PendingTurn = { modelStarted: false, title: t.title, resolve: t.resolve, reject: t.reject }
+    this.pendingTurn = turn
     void this.maybeAutoTitle(t.title)
 
     // Publish queue depth (0 because we're starting the turn now).
@@ -605,34 +602,38 @@ export class PiAcpSession {
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
     })
 
-    // Kick off pi, but completion is determined by pi events, not the RPC response.
-    // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
-    // continuations may emit multiple `agent_end` events before `agent_settled`.
-    this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
-        }
-
-        this.pendingTurn = null
-        this.inAgentLoop = false
-
-        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
-        })
+    // Handled input need not start model work or emit agent_settled. Started
+    // model work still waits for settlement across retries and continuations.
+    this.proc
+      .prompt(t.message, t.images)
+      .then(disposition => {
+        if (disposition === 'handled') return this.settleTurn(turn, true)
       })
-      void err
-    })
+      .catch(err => {
+        // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
+        // Also ensure we flush any already-enqueued updates first.
+        void this.flushEmits().finally(() => {
+          if (this.pendingTurn !== turn) return
+          // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
+          const authErr = maybeAuthRequiredError(err)
+          if (authErr) {
+            turn.reject(authErr)
+          } else {
+            const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
+            turn.resolve(reason)
+          }
+
+          this.pendingTurn = null
+
+          // If the prompt failed, do not automatically proceed—pi may be unhealthy.
+          // But we still clear the queueDepth metadata.
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+          })
+        })
+        void err
+      })
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
@@ -947,7 +948,7 @@ export class PiAcpSession {
       }
 
       case 'agent_start': {
-        this.inAgentLoop = true
+        if (this.pendingTurn) this.pendingTurn.modelStarted = true
         break
       }
 
@@ -960,7 +961,6 @@ export class PiAcpSession {
       case 'agent_end': {
         // One low-level run ended. Pi may still retry, compact, or process a queued
         // continuation, so keep the ACP turn open until `agent_settled`.
-        this.inAgentLoop = false
         break
       }
 
