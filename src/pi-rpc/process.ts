@@ -103,6 +103,10 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** Extra variables for the pi child only (never touches process.env). */
+  env?: Record<string, string>
+  /** Extra argv for the pi child (e.g. `--extension <bridge>`). */
+  extraArgs?: string[]
 }
 
 export class PiRpcProcess {
@@ -164,10 +168,10 @@ export class PiRpcProcess {
 
     // Windows cmd launchers need shell escaping; direct executables use native argv.
     const start = shouldUseShellForPiCommand(cmd) ? crossSpawn : spawn
-    const child = start(cmd, args, {
+    const child = start(cmd, [...args, ...(params.extraArgs ?? [])], {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env
+      env: { ...process.env, ...(params.env ?? {}) }
     }) as ChildProcessWithoutNullStreams
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a

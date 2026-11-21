@@ -26,6 +26,7 @@ import {
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
+import { handoffSpawnArgs } from './mcp-handoff.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
@@ -195,12 +196,14 @@ export class PiAcpAgent implements ACPAgent {
 
       const cwd = opts?.cwd ?? stored.cwd
 
+      const handoffExtras = handoffSpawnArgs(opts?.mcpServers ?? [])
       let proc: PiRpcProcess
       try {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          ...handoffExtras
         })
       } catch (e: any) {
         if (e?.name === 'PiRpcSpawnError') {
@@ -281,7 +284,8 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
-    // Pi doesn't support mcpServers, but we accept and store.
+    // MCP servers mount on the pi process through the bundled bridge extension
+    // (spawn env + --extension); the stored copy stays as the session record.
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,
