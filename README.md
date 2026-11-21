@@ -199,7 +199,7 @@ Project layout:
 ## Limitations
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
-- MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
+- MCP servers from `session/new`/`session/load` are bridged into pi via a bundled extension: pi-acp spawns pi with `-e <pi-mcp-extension>` and passes the server specs via `PI_ACP_MCP_SERVERS`. The extension connects each server (stdio, http, sse) and registers its tools as native pi tools named `mcp_<server>_<tool>`. ACP-transport MCP servers (`type: "acp"`) are not supported.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
