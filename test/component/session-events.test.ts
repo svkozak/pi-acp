@@ -146,6 +146,59 @@ test('PiAcpSession: emits tool locations from pi path args', async () => {
   assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: `${process.cwd()}/src/acp/session.ts` }])
 })
 
+for (const { name, toolName, offset, line } of [
+  { name: 'read offset 40', toolName: 'read', offset: 40, line: 39 },
+  { name: 'read offset 1', toolName: 'read', offset: 1, line: 0 },
+  { name: 'missing read offset', toolName: 'read', offset: undefined, line: undefined },
+  { name: 'null read offset', toolName: 'read', offset: null, line: undefined },
+  ...[0, -1, 1.5, '40', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(offset => ({
+    name: `invalid read offset ${offset}`,
+    toolName: 'read',
+    offset,
+    line: undefined
+  })),
+  { name: 'non-read offset', toolName: 'bash', offset: 40, line: undefined }
+]) {
+  test(`PiAcpSession: preserves locations through streaming and execution for ${name}`, async () => {
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+    const cwd = process.cwd()
+    const args = { path: 'README.org', limit: 5, offset }
+
+    new PiAcpSession({
+      sessionId: 's1',
+      cwd,
+      mcpServers: [],
+      // SAFETY: The fake implements the process methods exercised by these tool events.
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
+
+    for (const type of ['toolcall_start', 'toolcall_delta', 'toolcall_end']) {
+      proc.emit({
+        type: 'message_update',
+        assistantMessageEvent: { type, toolCall: { id: 't1', name: toolName, arguments: args } }
+      })
+    }
+    proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName, args })
+
+    await new Promise(r => setTimeout(r, 0))
+
+    assert.equal(conn.updates.length, 4)
+    for (const [index, { update }] of conn.updates.entries()) {
+      assert.equal(update.sessionUpdate, index === 0 ? 'tool_call' : 'tool_call_update')
+      if (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update') {
+        assert.fail('Expected a tool call update')
+      }
+      assert.deepEqual(
+        update.locations,
+        line === undefined ? [{ path: join(cwd, 'README.org') }] : [{ path: join(cwd, 'README.org'), line }]
+      )
+    }
+  })
+}
+
 test('PiAcpSession: handles extension select via ACP permission request', async () => {
   const conn = new FakeAgentSideConnection()
   conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'choice-1' } }
