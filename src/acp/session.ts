@@ -32,7 +32,7 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { toolResultTitle, toolResultToText } from './translate/pi-tools.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -841,6 +841,7 @@ export class PiAcpSession {
         const toolCallId = String((ev as any).toolCallId ?? '')
         if (!toolCallId) break
 
+        const toolName = String((ev as any).toolName ?? 'tool')
         const result = (ev as any).result
         const isError = Boolean((ev as any).isError)
         if (this.bashToolCallIds.has(toolCallId)) {
@@ -887,6 +888,7 @@ export class PiAcpSession {
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
+          title: toolResultTitle(toolName, result),
           status: isError ? 'failed' : 'completed',
           content,
           ...(hasStructuredDiff ? {} : { rawOutput: result })
