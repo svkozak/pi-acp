@@ -1,10 +1,22 @@
-import test from 'node:test'
+import test, { afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
+
+// Neutralize inherited PI_ACP_BASH_MAX_OUTPUT_LINES so tests that assert the
+// default streaming behavior aren't affected by the runtime environment.
+let previousBashMax: string | undefined
+beforeEach(() => {
+  previousBashMax = process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+  delete process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+})
+afterEach(() => {
+  if (previousBashMax === undefined) delete process.env.PI_ACP_BASH_MAX_OUTPUT_LINES
+  else process.env.PI_ACP_BASH_MAX_OUTPUT_LINES = previousBashMax
+})
 
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   const conn = new FakeAgentSideConnection()
@@ -102,12 +114,13 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
   assert.deepEqual((conn.updates[0]!.update as any)._meta, {
     terminal_info: { terminal_id: 't1', cwd: process.cwd() }
   })
-  assert.equal((conn.updates[0]!.update as any).rawInput, undefined)
+  assert.deepEqual((conn.updates[0]!.update as any).rawInput, { command: 'ls' })
 
   assert.equal(conn.updates[1]!.update.sessionUpdate, 'tool_call_update')
   assert.equal((conn.updates[1]!.update as any).toolCallId, 't1')
   assert.equal((conn.updates[1]!.update as any).status, 'in_progress')
   assert.equal((conn.updates[1]!.update as any).content, undefined)
+  assert.deepEqual((conn.updates[1]!.update as any).rawInput, { command: 'ls' })
   assert.deepEqual((conn.updates[1]!.update as any)._meta, {
     terminal_output: { terminal_id: 't1', data: 'running' }
   })
@@ -117,11 +130,14 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
   assert.equal((conn.updates[2]!.update as any).toolCallId, 't1')
   assert.equal((conn.updates[2]!.update as any).status, 'completed')
   assert.equal((conn.updates[2]!.update as any).content, undefined)
+  assert.deepEqual((conn.updates[2]!.update as any).rawInput, { command: 'ls' })
+  assert.deepEqual((conn.updates[2]!.update as any).rawOutput, {
+    content: [{ type: 'text', text: 'done' }]
+  })
   assert.deepEqual((conn.updates[2]!.update as any)._meta, {
     terminal_output: { terminal_id: 't1', data: 'done' },
     terminal_exit: { terminal_id: 't1', exit_code: 0, signal: null }
   })
-  assert.equal((conn.updates[2]!.update as any).rawOutput, undefined)
 })
 
 test('PiAcpSession: emits tool locations from pi path args', async () => {
@@ -476,36 +492,103 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
   )
 })
 
-test('PiAcpSession: emits streamed tool locations from pi path args', async () => {
+test('PiAcpSession: emits tool locations at execution start', async () => {
+  const previous = process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES
+  delete process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES
+
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
-  new PiAcpSession({
-    sessionId: 's1',
-    cwd: process.cwd(),
-    mcpServers: [],
-    proc: proc as any,
-    conn: asAgentConn(conn),
-    fileCommands: []
-  })
+  try {
+    new PiAcpSession({
+      sessionId: 's1',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
 
-  proc.emit({
-    type: 'message_update',
-    assistantMessageEvent: {
-      type: 'toolcall_start',
-      toolCall: {
-        id: 't1',
-        name: 'write',
-        arguments: { path: '/tmp/test.txt', content: 'hello' }
+    proc.emit({
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'toolcall_start',
+        toolCall: {
+          id: 't1',
+          name: 'write',
+          arguments: { path: '/tmp/test.txt', content: 'hello' }
+        }
       }
-    }
-  })
+    })
+    proc.emit({
+      type: 'tool_execution_start',
+      toolCallId: 't1',
+      toolName: 'write',
+      args: { path: '/tmp/test.txt', content: 'hello' }
+    })
 
-  await new Promise(r => setTimeout(r, 0))
+    await new Promise(r => setTimeout(r, 0))
 
-  assert.equal(conn.updates.length, 1)
-  assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
-  assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: '/tmp/test.txt' }])
+    const update = conn.updates.find(u => u.update.sessionUpdate === 'tool_call_update')
+    assert.ok(update)
+    assert.equal((update!.update as any).toolCallId, 't1')
+    assert.equal((update!.update as any).status, 'in_progress')
+    assert.equal((update!.update as any).title, 'write')
+    assert.deepEqual((update!.update as any).locations, [{ path: '/tmp/test.txt' }])
+  } finally {
+    if (previous === undefined) delete process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES
+    else process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES = previous
+  }
+})
+
+test('PiAcpSession: can emit descriptive tool titles at execution start', async () => {
+  const previous = process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES
+  process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES = 'true'
+
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  try {
+    new PiAcpSession({
+      sessionId: 's1',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
+
+    proc.emit({
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'toolcall_start',
+        toolCall: {
+          id: 't2',
+          name: 'write',
+          arguments: { path: '/tmp/test.txt', content: 'hello' }
+        }
+      }
+    })
+    proc.emit({
+      type: 'tool_execution_start',
+      toolCallId: 't2',
+      toolName: 'write',
+      args: { path: '/tmp/test.txt', content: 'hello' }
+    })
+
+    await new Promise(r => setTimeout(r, 0))
+
+    const update = conn.updates.find(
+      u => (u.update as any).toolCallId === 't2' && u.update.sessionUpdate === 'tool_call_update'
+    )
+    assert.ok(update)
+    assert.equal((update!.update as any).status, 'in_progress')
+    assert.equal((update!.update as any).title, 'Write /tmp/test.txt')
+    assert.deepEqual((update!.update as any).locations, [{ path: '/tmp/test.txt' }])
+  } finally {
+    if (previous === undefined) delete process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES
+    else process.env.PI_ACP_ENABLE_DESCRIPTIVE_TOOL_TITLES = previous
+  }
 })
 
 test('PiAcpSession: emits edit tool line when oldText matches uniquely', async () => {
