@@ -1578,6 +1578,10 @@ function buildStartupInfo(opts: {
   const projectSkillsDir = join(opts.cwd, '.pi', 'skills')
   pushSkillFromRoot(projectSkillsDir)
 
+  // Project skills (.agents/skills)
+  const projectAgentsSkillsDir = join(opts.cwd, '.agents', 'skills')
+  pushSkillFromRoot(projectAgentsSkillsDir)
+
   addSection('Skills', skillsItems)
 
   // Prompts
