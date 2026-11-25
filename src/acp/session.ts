@@ -350,9 +350,10 @@ export class PiAcpSession {
   }
 
   /**
-   * Best-effort attempt to send startup info outside of a prompt turn.
-   * Some clients (e.g. Zed) may only render agent messages once the UI is ready;
-   * callers can invoke this shortly after session/new returns.
+   * Emit the deferred startup info as an `agent_message_chunk`, but only if it
+   * hasn't been sent yet. Must be called while a `session/prompt` turn is active
+   * (i.e. from `startTurn`), since ACP forbids per-turn updates outside of a
+   * prompt turn. See https://github.com/svkozak/pi-acp/issues/59.
    */
   sendStartupInfoIfPending(): void {
     if (this.startupInfoSent || !this.startupInfo) return
@@ -598,6 +599,12 @@ export class PiAcpSession {
 
     this.pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject }
     void this.maybeAutoTitle(t.title)
+
+    // Flush the deferred startup banner (pi version / context / skills / extensions) as
+    // the first agent_message_chunk of this turn. ACP requires per-turn updates to
+    // arrive while a `session/prompt` is active, so this must happen here rather than
+    // immediately after session/new (which strict ACP clients reject as out-of-turn).
+    this.sendStartupInfoIfPending()
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
