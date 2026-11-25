@@ -82,6 +82,17 @@ function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate 
   return { sessionUpdate: 'usage_update', used, size }
 }
 
+/**
+ * ACP has no neutral option kind, so a declining name (No, Cancel, Deny…) must be `reject_once`;
+ * stamping every option `allow_once` tells the host a "No" is an approval.
+ */
+const REJECT_OPTION_NAME =
+  /^\s*(no\b|n\/a\b|never\b|not\b|none\b|cancel|abort|decline|deny|den(y|ied)|disallow|reject|refuse|skip|stop|don'?t\b|do not\b)/i
+
+function toPermissionOptionKind(name: string): PermissionOption['kind'] {
+  return REJECT_OPTION_NAME.test(name) ? 'reject_once' : 'allow_once'
+}
+
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
 
@@ -693,7 +704,7 @@ export class PiAcpSession {
 
             const locations = toToolCallLocations(rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
-            // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
+            // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_update).
             const status = existingStatus ?? 'pending'
 
             if (isBashTool(toolName)) {
@@ -738,6 +749,8 @@ export class PiAcpSession {
         break
       }
 
+      // pi emits this before its tool_call hooks run (prepareToolCall), so the call may still be
+      // held at an extension's permission gate: report `pending`, not `in_progress`.
       case 'tool_execution_start': {
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
@@ -747,13 +760,13 @@ export class PiAcpSession {
         if (isBashTool(toolName)) {
           const locations = toToolCallLocations(args, this.cwd)
           const existingStatus = this.currentToolCalls.get(toolCallId)
-          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.currentToolCalls.set(toolCallId, 'pending')
           this.emitBashToolCall({
             sessionUpdate: existingStatus ? 'tool_call_update' : 'tool_call',
             toolCallId,
             toolName,
             args,
-            status: 'in_progress',
+            status: 'pending',
             locations,
             includeTerminal: !existingStatus
           })
@@ -789,22 +802,22 @@ export class PiAcpSession {
 
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
-          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.currentToolCalls.set(toolCallId, 'pending')
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
             title: toolName,
             kind: toToolKind(toolName),
-            status: 'in_progress',
+            status: 'pending',
             locations,
             rawInput: args
           })
         } else {
-          this.currentToolCalls.set(toolCallId, 'in_progress')
+          this.currentToolCalls.set(toolCallId, 'pending')
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
-            status: 'in_progress',
+            status: 'pending',
             locations,
             rawInput: args
           })
@@ -813,9 +826,12 @@ export class PiAcpSession {
         break
       }
 
+      // Output means the call is past every gate, so `in_progress` starts here.
       case 'tool_execution_update': {
         const toolCallId = String((ev as any).toolCallId ?? '')
         if (!toolCallId) break
+
+        if (this.currentToolCalls.has(toolCallId)) this.currentToolCalls.set(toolCallId, 'in_progress')
 
         const partial = (ev as any).partialResult
         if (this.bashToolCallIds.has(toolCallId)) {
@@ -1027,7 +1043,7 @@ export class PiAcpSession {
     const permissionOptions: PermissionOption[] = options.map((name, index) => ({
       optionId: `${CHOICE_OPTION_PREFIX}${index}`,
       name,
-      kind: 'allow_once'
+      kind: toPermissionOptionKind(name)
     }))
 
     const selected = await this.requestExtensionPermission(id, ev, permissionOptions)
