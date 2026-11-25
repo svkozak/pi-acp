@@ -19,6 +19,7 @@ import {
   type PiSessionStats
 } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
+import { buildExtensionUiForm } from './extension-ui-form.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
@@ -40,6 +41,7 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
+  formElicitation?: boolean
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -66,6 +68,7 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
+const METHOD_NOT_FOUND = -32601
 
 /**
  * Map pi's `stats.contextUsage` to an ACP `usage_update`. Returns null whenever pi
@@ -244,7 +247,8 @@ export class SessionManager {
       proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      autoTitle: true
+      autoTitle: true,
+      formElicitation: params.formElicitation
     })
 
     this.sessions.set(sessionId, session)
@@ -272,7 +276,8 @@ export class SessionManager {
       proc: params.proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      autoTitle: false
+      autoTitle: false,
+      formElicitation: params.formElicitation
     })
 
     this.sessions.set(sessionId, session)
@@ -294,6 +299,9 @@ export class PiAcpSession {
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
   private readonly fileCommands: FileSlashCommand[]
+
+  // True while the client can render form elicitation. Cleared if it turns out it can't.
+  private formElicitation: boolean
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -332,6 +340,7 @@ export class PiAcpSession {
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
     autoTitle?: boolean
+    formElicitation?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -340,6 +349,7 @@ export class PiAcpSession {
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
     this.initialTitlePending = opts.autoTitle ?? false
+    this.formElicitation = opts.formElicitation ?? false
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -981,6 +991,10 @@ export class PiAcpSession {
       return
     }
 
+    if (this.formElicitation && (await this.tryExtensionForm(ev, id, method))) {
+      return
+    }
+
     if (method === 'select') {
       await this.handleExtensionSelect(ev, id)
       return
@@ -1014,6 +1028,34 @@ export class PiAcpSession {
     }
 
     await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+  }
+
+  /**
+   * Ask a form-capable client the dialog as a form. Returns false when the caller should
+   * use the permission bridge instead (not expressible as a form, or the client abstained).
+   */
+  private async tryExtensionForm(ev: PiRpcEvent, id: string, method: string | null): Promise<boolean> {
+    const form = method ? buildExtensionUiForm(this.sessionId, method, ev) : null
+    if (!form) {
+      return false
+    }
+
+    let res: Awaited<ReturnType<AgentSideConnection['unstable_createElicitation']>>
+    try {
+      res = await this.conn.unstable_createElicitation(form.request)
+    } catch (e) {
+      if (e instanceof RequestError && e.code === METHOD_NOT_FOUND) {
+        // -32601 means this client can't do forms after all; stop asking.
+        this.formElicitation = false
+        return false
+      }
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return true
+    }
+
+    const answer = res.action === 'accept' ? form.answer(res.content) : null
+    await this.proc.sendExtensionUiResponse(answer ? { id, ...answer } : { id, cancelled: true })
+    return true
   }
 
   private async handleExtensionSelect(ev: PiRpcEvent, id: string): Promise<void> {
