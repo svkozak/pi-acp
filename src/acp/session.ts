@@ -71,6 +71,10 @@ const CHOICE_OPTION_PREFIX = 'choice-'
  * Map pi's `stats.contextUsage` to an ACP `usage_update`. Returns null whenever pi
  * reports no trustworthy token count (e.g. `tokens: null` right after compaction) or
  * the values are not usable integers.
+ *
+ * `stats.cost` is pi's cumulative session cost. Pi prices models in US dollars per million
+ * tokens (see pi's docs/rpc-commands.md, "Costs are in US dollars per million tokens"), so it
+ * is reported as USD; a missing or unusable cost is omitted.
  */
 function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate | null {
   const used = stats?.contextUsage?.tokens
@@ -79,7 +83,10 @@ function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate 
   if (typeof used !== 'number' || !Number.isSafeInteger(used) || used < 0) return null
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null
 
-  return { sessionUpdate: 'usage_update', used, size }
+  const cost = stats?.cost
+  if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0)
+    return { sessionUpdate: 'usage_update', used, size }
+  return { sessionUpdate: 'usage_update', used, size, cost: { amount: cost, currency: 'USD' } }
 }
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
