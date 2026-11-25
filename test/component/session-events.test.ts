@@ -476,7 +476,7 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
   )
 })
 
-test('PiAcpSession: emits streamed tool locations from pi path args', async () => {
+test('PiAcpSession: waits for streamed tool paths to complete before emitting locations', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -489,10 +489,26 @@ test('PiAcpSession: emits streamed tool locations from pi path args', async () =
     fileCommands: []
   })
 
+  const emitToolCall = (type: 'toolcall_start' | 'toolcall_delta', path: string) => {
+    proc.emit({
+      type: 'message_update',
+      assistantMessageEvent: {
+        type,
+        partial: {
+          content: [{ type: 'toolCall', id: 't1', name: 'write', arguments: { path } }]
+        },
+        contentIndex: 0
+      }
+    })
+  }
+
+  emitToolCall('toolcall_start', '/')
+  emitToolCall('toolcall_delta', '/tmp')
+  emitToolCall('toolcall_delta', '/tmp/test.txt')
   proc.emit({
     type: 'message_update',
     assistantMessageEvent: {
-      type: 'toolcall_start',
+      type: 'toolcall_end',
       toolCall: {
         id: 't1',
         name: 'write',
@@ -503,9 +519,13 @@ test('PiAcpSession: emits streamed tool locations from pi path args', async () =
 
   await new Promise(r => setTimeout(r, 0))
 
-  assert.equal(conn.updates.length, 1)
+  assert.equal(conn.updates.length, 4)
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
-  assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: '/tmp/test.txt' }])
+  for (const update of conn.updates.slice(0, -1)) {
+    assert.equal((update.update as any).locations, undefined)
+  }
+  assert.equal(conn.updates[3]!.update.sessionUpdate, 'tool_call_update')
+  assert.deepEqual((conn.updates[3]!.update as any).locations, [{ path: '/tmp/test.txt' }])
 })
 
 test('PiAcpSession: emits edit tool line when oldText matches uniquely', async () => {
